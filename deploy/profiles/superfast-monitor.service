@@ -1,0 +1,7 @@
+[Unit]
+Description=SUPERFAST engine sampler (one sample per run)
+Documentation=file://__HOME__/.local/bin/superfast-monitor.py
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 __HOME__/.local/bin/superfast-monitor.py

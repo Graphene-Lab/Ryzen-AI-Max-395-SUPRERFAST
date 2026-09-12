@@ -21,6 +21,7 @@ installs them, replacing the placeholders
 | `orchestrator.service` | the small LFM2.5 router, on port 8732 (runs beside a profile) |
 | `superfast-download@.service` | one downloader per profile: `superfast-download@flash`, `@gemma`, `@deepseek`, `@small` |
 | `download-weights.sh` | the downloader itself: resume at the exact byte offset, one writer per file, SHA-256 verified before the final rename |
+| `superfast-monitor.service`, `superfast-monitor.timer` | the engine sampler: one read of `/health`, `/cache`, the GPU and memory every 30 s, for telling a slow machine apart from a queueing one |
 
 The dense unit has a `.service` file of its own because it is installed by two
 phases: the engine phase starts it on a fresh machine, and the profiles phase
@@ -31,7 +32,8 @@ already-installed machine — rewrote every unit except that one.
 Only one profile serves port 8731 at a time; `superfast-switch use <profile>`
 stops the others first. All these units stay disabled until the switch starts
 them, except the downloaders, which the setup script enables only for profiles
-whose weights are still missing.
+whose weights are still missing, and the sampler timer, which the setup script
+starts and which samples whichever profile is active.
 
 The GGUF units are configured for agent use, and the values were measured on
 the reference host:

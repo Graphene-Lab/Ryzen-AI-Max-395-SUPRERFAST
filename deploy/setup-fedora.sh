@@ -592,6 +592,28 @@ phase_profiles() {
         fi
     done
 
+    # 5. The sampler. One `/health` and one `/cache` read every 30 s, plus the
+    #    GPU and memory counters, appended to
+    #    ~/.local/share/superfast-monitor/samples.jsonl; `superfast-monitor.py
+    #    --report 24` prints what it collected. It is how a machine that looks
+    #    slow is told apart from one that is queueing: the engine's own log
+    #    says how long each request took, but not how many were waiting.
+    if [ -f "$SCRIPT_DIR/../tools/superfast-monitor.py" ]; then
+        install_template "$SCRIPT_DIR/../tools/superfast-monitor.py" \
+            "$HOME/.local/bin/superfast-monitor.py"
+        chmod 755 "$HOME/.local/bin/superfast-monitor.py"
+        for mu in superfast-monitor.service superfast-monitor.timer; do
+            if [ -f "$PROF_DIR/$mu" ]; then
+                install_template "$PROF_DIR/$mu" "$HOME/.config/systemd/user/$mu"
+            fi
+        done
+        systemctl --user enable --now superfast-monitor.timer \
+            || log "sampler installed but not started; start it later with: systemctl --user enable --now superfast-monitor.timer"
+        log "sampler installed: superfast-monitor.py --report 24"
+    else
+        log "tools/superfast-monitor.py not found next to the script; skipping the sampler"
+    fi
+
     systemctl --user daemon-reload
     log "profiles prepared: $requested"
     log "switch between them with: superfast-switch use dense|flash|gemma|deepseek"

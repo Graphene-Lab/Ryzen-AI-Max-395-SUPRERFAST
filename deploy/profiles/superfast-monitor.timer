@@ -1,0 +1,15 @@
+[Unit]
+Description=Sample the SUPERFAST engine every 30 seconds
+
+[Timer]
+# 30 s is fine-grained enough for queueing, which lasts minutes, and costs one
+# /health and one /cache read per sample. The sampler exits 0 with a message
+# when no profile is serving, so an idle machine does not fill the journal with
+# failed units.
+OnBootSec=60
+OnUnitActiveSec=30
+AccuracySec=1s
+Unit=superfast-monitor.service
+
+[Install]
+WantedBy=timers.target

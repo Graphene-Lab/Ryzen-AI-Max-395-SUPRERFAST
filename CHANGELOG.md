@@ -35,6 +35,17 @@
   guided path was run on the reference machine, the unattended path has not had
   its first fresh-host run, and installer breakage is treated as the top
   priority.
+- **`superfast-monitor.py`, and the timer that runs it every 30 seconds.** The
+  setup script installs it from `tools/`, with the two units in
+  `deploy/profiles/`. It reads the engine's loopback `/health` and `/cache`,
+  the GPU counters and the memory, and appends one line per sample to
+  `~/.local/share/superfast-monitor/samples.jsonl`; `--report 24` prints what
+  it collected. It exists because the engine's log says how long each request
+  took but not how many were waiting, which is the difference between a slow
+  answer and a queued one: `/health`'s `queued` is the field that says the
+  machine is fine and the budget is not. Read-only, no API key, and it exits 0
+  with a message when no profile is serving, so an idle machine collects no
+  failed units.
 
 ### Fixed
 

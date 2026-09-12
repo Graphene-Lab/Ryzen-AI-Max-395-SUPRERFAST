@@ -366,6 +366,7 @@ Workstation 44. There are two ways to get there:
   paragraph kept a dense unit with no `HALOGEN_QUEUE_TIMEOUT` and no
   `HALOGEN_MAX_TOKENS_CAP` in it. Both are now installed from
   `deploy/profiles/dense.service`, and the profiles phase refreshes that too.
+  The phase also installs the [sampler](#watch-a-busy-machine).
 
   The weights of the extra profiles are fetched by one systemd service per
   profile, so the script returns instead of waiting hours for them, the
@@ -1151,6 +1152,91 @@ To go back to the image defaults, delete the six `-e HALOGEN_*` lines from the
 the engine then sizes everything itself, including the pool. To keep the fix
 but use less memory, set `HALOGEN_KV_POOL_POSITIONS=786432` and drop
 `HALOGEN_MAX_TOK` so the arena returns to 32768.
+
+#### What a real fleet looks like on this pool
+
+The table above measures four agents at 139,541 tokens. Agents in practice run
+longer conversations than that, and the pool is a budget, so it is worth
+knowing what it does when the sessions grow. These figures were read out of the
+engine's own log on the reference host over 30 hours of ordinary use, with the
+[sampler](#watch-a-busy-machine) recording alongside it (2,029 requests, one
+client, all answered 200, no restarts):
+
+| conversations decoding at once | tokens/s per conversation |
+|---|---|
+| 1 | 38.5 |
+| 2 | 21.3 |
+| 3 | 16.9 |
+| 4 | 14.4 |
+| more than 4 | 12–14 (the extra requests queue for a slot) |
+
+Read the first column as slots, not as clients: the profile has four, and a
+fifth request waits for room in the pool. On this fleet the sessions were
+150,000–225,000 tokens long with the client's 32,768-token answer budget, so
+each request reserved 180,000–260,000 positions and four of them came to
+1.02–1.05 million — the pool, exactly. The consequences, measured over the same
+30 hours:
+
+- **The prompt cache is not the problem, and it does work.** 94.9% of all
+  prompt tokens were served from cache (`/cache`: 1,791 hits, 173 misses,
+  hit_rate 0.91, 214 M tokens saved). The prefix cache is keyed on the prompt
+  itself, so a stateless client costs nothing as long as the beginning of the
+  prompt is stable.
+- **Queueing is the cost.** 143 requests (7.5%) took more than a minute longer
+  than their own decoding needed, and the worst cases are unambiguous: a 20-token
+  answer that took 280–444 s, and 65 tokens that took 272 s. That is not a slow
+  model, it is a request waiting for a slot. On the same 30 hours, 54% of the
+  total wall clock was spent waiting rather than decoding.
+- **Dropping a conversation is the other cost.** 77 requests had to prefill a
+  prompt longer than 20,000 tokens from zero (mean 214 s, worst 475 s), and 21
+  of those were the *same* conversation continued minutes after it had been
+  served — its cached state had been dropped to make room. The engine's own
+  watchdog agrees: it logged `the engine has not answered PING for 45s` 32
+  times, once an hour, always while a long request was in flight. The kill
+  threshold is 180 s and was never reached, so this is a symptom of a busy
+  engine, not of a stuck one.
+- **The fix is fewer positions per request, not a bigger pool.** A request with
+  a 16,384-token answer budget instead of 32,768 reserves 16,384 positions less,
+  and four long conversations then fit with room to spare. Raising
+  `HALOGEN_KV_POOL_POSITIONS` to 1,572,864 is the other option, but the pool is
+  the only term here that can shrink: on a machine already holding ~68 GiB of
+  weights and ~11 GiB of scratch, that value leaves a few GiB of headroom,
+  against the ~26 GiB this fleet runs with today.
+
+### Watch a busy machine
+
+The engine's log says how long each request took, but not how many were
+waiting, and on a machine with several agents that is the difference between an
+answer that is slow and an answer that is queued. `superfast-monitor.timer`
+closes that gap: every 30 seconds it reads the engine's `/health` and `/cache`,
+the GPU counters and the memory, and appends one line to
+`~/.local/share/superfast-monitor/samples.jsonl` (rotating at 20 MB). The setup
+script installs and starts it; nothing has to be enabled by hand.
+
+```bash
+superfast-monitor.py --report 24     # the last 24 hours, in one screen
+systemctl --user stop superfast-monitor.timer   # stop sampling
+```
+
+Three fields are worth knowing by heart, all in `/health`:
+
+| field | what it tells you |
+|---|---|
+| `in_flight` | conversations being decoded right now. This is what the tokens/s table above keys on |
+| `queued` | requests that arrived and are waiting for room in the KV pool. **This is the number that means "the machine is fine, the budget is not"** |
+| `busy_for_s` | how long the request currently in flight has been running |
+
+A `queued` above zero for minutes at a time is the signal the pool or the
+answer budgets need changing — see
+[what a real fleet looks like](#what-a-real-fleet-looks-like-on-this-pool).
+A `queued` that is always zero while answers feel slow is a different problem,
+and the report's cache section separates the rest: a low hit rate means the
+prompt prefix is changing between turns, a high `evicted` count means
+conversations are being dropped to make room.
+
+The sampler is read-only, needs no API key — it reads loopback — and only
+writes in its own directory. It exits 0 without a sample when no profile is
+serving, so an idle machine does not collect failed units.
 
 ---
 
