@@ -360,6 +360,13 @@ Workstation 44. There are two ways to get there:
   the machine comes up on whichever profile was enabled before (dense, on a
   machine from the automated install).
 
+  Keep `dense` in the `PROFILES` list of that command: until 2026-09-13 the
+  dense unit was written by the engine phase alone, so `ONLY=profiles` rewrote
+  every unit except `superfast.service`, and a machine that followed this
+  paragraph kept a dense unit with no `HALOGEN_QUEUE_TIMEOUT` and no
+  `HALOGEN_MAX_TOKENS_CAP` in it. Both are now installed from
+  `deploy/profiles/dense.service`, and the profiles phase refreshes that too.
+
   The weights of the extra profiles are fetched by one systemd service per
   profile, so the script returns instead of waiting hours for them, the
   transfers resume after a reboot, and each file is checked against the

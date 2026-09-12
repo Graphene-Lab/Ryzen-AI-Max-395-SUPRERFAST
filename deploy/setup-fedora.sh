@@ -203,6 +203,7 @@ install_template() { # src dst
         -e "s#__GEMMA_DIR__#$MODELS_DIR_GEMMA#g" \
         -e "s#__DEEPSEEK_DIR__#$MODELS_DIR_DEEPSEEK#g" \
         -e "s#__SMALL_DIR__#$MODELS_DIR_SMALL#g" \
+        -e "s#__DENSE_IMAGE__#$IMAGE#g" \
         -e "s#__FLASH_IMAGE__#$FLASH_IMAGE#g" "$1" > "$2"
 }
 
@@ -444,47 +445,21 @@ phase_engine() {
 
     UID_NUM="$(id -u)"
     mkdir -p "$HOME/.config/systemd/user"
-    cat > "$HOME/.config/systemd/user/superfast.service" <<EOF
-[Unit]
-Description=SUPERFAST engine (Qwen3.8-27B on Strix Halo)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-Environment=XDG_RUNTIME_DIR=/run/user/$UID_NUM
-ExecStartPre=-/usr/bin/podman rm -f superfast
-ExecStart=/usr/bin/podman run --name superfast --rm -p 127.0.0.1:8731:8731 \\
-  --device /dev/kfd --device /dev/dri --group-add keep-groups \\
-  --security-opt seccomp=unconfined --ipc=host \\
-  -e HALOGEN_QUEUE_TIMEOUT=6000 \\
-  -e HALOGEN_MAX_TOKENS_CAP=65536 \\
-  -v $MODELS_DIR:/models:ro \\
-  -v $MODELS_DIR/tokenizer:/tokenizer:ro \\
-  $IMAGE
-# Request policy, set here rather than left to the image (the names are the
-# engine's: a SUPERFAST_ prefix is read by nobody). QUEUE_TIMEOUT 6000 s is the
-# time a request waits before the engine answers 503; with one slot the worst
-# wait four concurrent requests can produce is 4,980 s, so a shorter value
-# would throw away the work already queued. MAX_TOKENS_CAP 65536 is the largest
-# answer budget a request may ask for; above it the engine answers 400 rather
-# than truncating. The arithmetic, and the client-side values that go with it,
-# are in the README under "Timeouts, and why they are what they are".
-ExecStop=/usr/bin/podman stop -t 30 superfast
-# podman run in the foreground exits 143 (SIGTERM) or 137 (SIGKILL) when the
-# container is stopped. Without this line a profile switch leaves the unit in
-# the "failed" state, which \`superfast-switch status\` then reports.
-# The backticks above are escaped on purpose: this heredoc is unquoted, so an
-# unescaped command substitution here would RUN at install time and paste its
-# output into this unit — which is how the dense unit on the reference machine
-# ended up carrying a status listing instead of that sentence.
-SuccessExitStatus=137 143
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=default.target
-EOF
+    # The dense unit comes from deploy/profiles/dense.service, like the other
+    # four, and not from a heredoc here. Two reasons: phase_profiles can then
+    # refresh it too (an upgraded machine reaches the dense unit through
+    # `ONLY=profiles`, which used to rewrite every unit except this one), and a
+    # file cannot be corrupted by the shell that installs it — the heredoc this
+    # replaces once ran a command substitution from its own comment text.
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [ -f "$script_dir/profiles/dense.service" ]; then
+        install_template "$script_dir/profiles/dense.service" \
+            "$HOME/.config/systemd/user/superfast.service"
+    else
+        log "$script_dir/profiles/dense.service missing; cannot install the dense unit"
+        return 1
+    fi
 
     XDG_RUNTIME_DIR="/run/user/$UID_NUM" systemctl --user daemon-reload
     # enable, then restart: `enable --now` does nothing to a unit that is
@@ -575,6 +550,21 @@ phase_profiles() {
         # Keep the orchestrator available when its weights are already there.
         [ -f "$MODELS_DIR_SMALL/LFM2.5-1.2B-Thinking-ToMoE-Q4_K_M.gguf" ] && requested="$requested small"
     ;; esac
+
+    #    The dense unit is installed here as well, from the same template the
+    #    engine phase uses. It used to be written only by the engine phase, so
+    #    `ONLY=profiles` — the documented way to pick up changed engine
+    #    settings on a machine that is already installed — refreshed every unit
+    #    except the dense one, and a machine following that documentation kept
+    #    a `superfast.service` without the request policy in it.
+    if in_profiles dense; then
+        if [ -f "$PROF_DIR/dense.service" ]; then
+            install_template "$PROF_DIR/dense.service" "$HOME/.config/systemd/user/superfast.service"
+            log "superfast.service (dense) refreshed from deploy/profiles/dense.service"
+        else
+            log "$PROF_DIR/dense.service missing; skipping the dense unit"
+        fi
+    fi
 
     for p in flash gemma deepseek small; do
         case " $requested " in *" $p "*) ;; *) continue ;; esac

@@ -2,19 +2,31 @@
 
 These files are the profiles the model switch can start, and the downloader
 that fetches their weights. They are templates: `deploy/setup-fedora.sh`
-installs them, replacing the two placeholders
+installs them, replacing the placeholders
 
 - `__HOME__` — the home directory of the user running the script,
-- `__XDG__` — `/run/user/<uid>`, which rootless Podman needs.
+- `__XDG__` — `/run/user/<uid>`, which rootless Podman needs,
+- `__DENSE_DIR__`, `__FLASH_DIR__`, `__GEMMA_DIR__`, `__DEEPSEEK_DIR__`,
+  `__SMALL_DIR__` — where each profile's weights live, so a `MODELS_DIR_*`
+  override reaches the installed units,
+- `__DENSE_IMAGE__`, `__FLASH_IMAGE__` — the engine images, so
+  `SUPERFAST_IMAGE` and `SUPERFAST_FLASH_IMAGE` do too.
 
 | file | what it is |
 |---|---|
+| `dense.service` | Qwen3.8-27B, the quality profile, installed as `superfast.service` |
 | `superfast-flash.service` | Qwen3.8-Flash-Next MoE, the fast profile on the engine image |
 | `gemma.service` | Gemma-4-26B-A4B ROCmFP4, on the local `llama-rocmfpx` image |
 | `deepseek.service` | DeepSeek-V4-Flash ROCmFPX, on the local `llama-rocmfpx` image |
 | `orchestrator.service` | the small LFM2.5 router, on port 8732 (runs beside a profile) |
 | `superfast-download@.service` | one downloader per profile: `superfast-download@flash`, `@gemma`, `@deepseek`, `@small` |
 | `download-weights.sh` | the downloader itself: resume at the exact byte offset, one writer per file, SHA-256 verified before the final rename |
+
+The dense unit has a `.service` file of its own because it is installed by two
+phases: the engine phase starts it on a fresh machine, and the profiles phase
+refreshes it. It used to be written by the engine phase alone, so
+`ONLY=profiles` — the documented way to pick up changed engine settings on an
+already-installed machine — rewrote every unit except that one.
 
 Only one profile serves port 8731 at a time; `superfast-switch use <profile>`
 stops the others first. All these units stay disabled until the switch starts
