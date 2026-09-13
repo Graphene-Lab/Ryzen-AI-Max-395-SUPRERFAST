@@ -20,12 +20,13 @@ this class is normally reached through a rented API, or served from several
 data-centre GPUs; here it runs at home, and nothing you send it leaves the
 machine.
 
-![A video game built with the flash profile on this machine](assets/game.png)
+![A Minecraft-style adventure game built with the flash profile](assets/game.png)
 
-*A game built with the flash profile (Qwen3.8-Flash-Next) on this machine,
-following this guide. It is a demonstration of what a 125B model can produce
-locally when the engine is set up for the hardware it runs on: no cloud
-service, no per-token cost, and the weights on the disk next to you.*
+*A Minecraft-style adventure game built with the flash profile
+(Qwen3.8-Flash-Next) on this machine, following this guide. The goal is to solve
+puzzles and rescue the princess from the dragon. It is a demonstration of what a
+125B model can produce locally: no cloud service, no per-token cost, and the
+weights on the disk next to you.*
 
 ## Install a machine
 
