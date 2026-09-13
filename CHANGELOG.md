@@ -64,6 +64,16 @@
 
 ### Changed
 
+- **The recommended flash answer budget is 16,384, not 32,768.** This is the
+  one client value that has to follow the server, and it follows from the pool:
+  each request reserves `prompt + max_tokens` positions, so the answer budget
+  decides how many long conversations stay resident. Four agents carrying
+  150,000 tokens each reserve 665,536 positions with this budget and 731,072
+  with 32,768, against a pool of 786,432. The client table, the JSON example
+  and the derivation of the two timeout values were all built on the larger
+  figure, so all three are updated. The timeouts themselves do not change: a
+  smaller budget only makes their worst case smaller, and they are deliberately
+  generous.
 - **The pool's size is measured now, not argued.** The eight-client runs could
   not settle it: with eight clients against four slots both pools are exceeded
   at once and the slots decide. The shape that separates them is four clients at

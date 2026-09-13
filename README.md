@@ -1114,7 +1114,8 @@ inside the 786,432 that ships today:
 
 So on the defaults two of the four agents pay for their whole history again,
 and none does with the larger pool — and 786,432 is enough for it, because four
-agents at 139.5K with an 8,192-token budget reserve 590,000 positions. What the
+agents at 139.5K with an 8,192-token budget reserve 590,932 positions, and
+623,700 with the 16,384-token budget the client table recommends. What the
 pool cannot do is hold four conversations of 200,000 tokens or more: that would
 need 1,048,576, which no longer starts here (see
 [the startup table](#the-pool-also-decides-whether-the-engine-starts)). That is
@@ -2073,7 +2074,7 @@ tuned for coding:
     "maxRetries": 1,
     "contextWindowSize": 262144,
     "extra_body": { "reasoning_effort": "low" },
-    "samplingParams": { "max_tokens": 32768 }
+    "samplingParams": { "max_tokens": 16384 }
   }
 }
 ```
@@ -2084,27 +2085,37 @@ client sends as the model name, so it must match what `/health` reports, and
 
 | profile | `id` | context window | answer budget | `streamIdleTimeoutMs` | `timeout` | `temperature` | `extra_body` |
 |---|---|---|---|---|---|---|---|
-| Flash-Next | `halogen-qwen3.8-flash-next` | 262,144 | 32,768 | 4,200,000 | 6,000,000 | leave unset | `{"reasoning_effort":"low"}` |
+| Flash-Next | `halogen-qwen3.8-flash-next` | 262,144 | 16,384 | 4,200,000 | 6,000,000 | leave unset | `{"reasoning_effort":"low"}` |
 | Dense 27B | `halogen-qwen3.8-27b` | 262,144 | 16,384 | 7,200,000 | 9,000,000 | leave unset | `{"reasoning_effort":"low"}` |
 | Gemma-4-26B | `gemma-4-26b-a4b` | 262,144 | 32,768 | 3,600,000 | 4,800,000 | **0** | none, the profile ignores it |
 | DeepSeek-V4-Flash | `deepseek-v4-flash` | 524,288 | 16,384 | 8,400,000 | 10,800,000 | **0** | none, the profile ignores it |
 
 Both timeouts are milliseconds, and they are not round numbers by accident:
-they are the worst case of that profile — the largest prompt it serves, the
+each one is the worst case of that profile — the largest prompt it serves, the
 longest answer its budget allows, and the wait for the requests ahead of it —
-rounded up to whole minutes. [Timeouts, and why they are what they
+rounded up to whole minutes and then up again to leave margin.
+[Timeouts, and why they are what they
 are](#timeouts-and-why-they-are-what-they-are) shows each term. They are
 deliberately generous: a timeout that is too small cuts a turn that is still
 running, while a timeout that is too large only means a client takes longer to
-notice a server that has stopped answering.
+notice a server that has stopped answering. A smaller answer budget makes the
+sum smaller, so these values stay valid when a profile's budget goes down:
+flash's did, from 32,768 to 16,384, and its two values were left as they are.
 
-The dense budget is smaller than the flash budget on purpose. Dense answers at
-21.0 tokens per second on prose and 26.1 on code, against 37.7 and 46.4 on
-flash, so the same number of tokens takes longer there and the client's
-15-minute stream limit would cut the answer before the model finished. Gemma
-answers at 57.3 and holds 32,768 inside the limit; DeepSeek answers at 11.2, so
-a full 16,384-token answer takes about 24 minutes and needs the longer limit
-below.
+The flash budget is 16,384 and not more because of the KV pool, and this is the
+one client value that has to follow the server. Every request reserves
+`prompt + max_tokens` positions of the pool, so the answer budget decides how
+many long conversations stay resident at once: four agents carrying 150,000
+tokens each reserve 665,536 positions with this budget and 731,072 with 32,768,
+and the pool the unit ships holds 786,432. Dense uses the same 16,384, and it
+suits dense for the second reason below.
+
+Those second reasons are about speed. Dense answers at 21.0 tokens per second
+on prose and 26.1 on code, against 37.7 and 46.4 on flash, so the same number of
+tokens takes longer there and the client's 15-minute stream limit would cut the
+answer before the model finished. Gemma answers at 57.3 and holds 32,768 inside
+the limit; DeepSeek answers at 11.2, so a full 16,384-token answer takes about
+24 minutes and needs the longer limit below.
 
 `temperature` is only set on Gemma and DeepSeek, because those two declare no
 sampling default of their own: without the field the client's own default
@@ -2150,7 +2161,7 @@ answer budget:
 
 | profile | largest prompt | prefill | answer | wait in queue | silence | whole request |
 |---|---|---|---|---|---|---|
-| Flash-Next | 229,376 tok @ 709 t/s | 324 s | 869 s | 3,600 s (the engine's queue timeout) | 3,924 s → **4,200,000 ms** | 4,793 s → **6,000,000 ms** |
+| Flash-Next | 245,760 tok @ 709 t/s | 347 s | 435 s | 3,600 s (the engine's queue timeout) | 3,947 s → **4,200,000 ms** | 4,382 s → **6,000,000 ms** |
 | Dense 27B | 245,760 tok @ 528 t/s | 465 s | 780 s | 6,000 s (the engine's queue timeout) | 6,465 s → **7,200,000 ms** | 7,245 s → **9,000,000 ms** |
 | Gemma-4-26B | 229,376 tok @ 1,527 t/s | 150 s | 572 s | 2,888 s (four requests ahead) | 3,038 s → **3,600,000 ms** | 3,610 s → **4,800,000 ms** |
 | DeepSeek-V4-Flash | 507,904 tok @ 163 t/s | 3,116 s | 1,463 s | 4,579 s (one request ahead) | 7,695 s → **8,400,000 ms** | 9,158 s → **10,800,000 ms** |
