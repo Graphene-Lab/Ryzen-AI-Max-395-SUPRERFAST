@@ -54,14 +54,17 @@ when you switch.
 2. Connect to it once over SSH (a cable or your home network is fine).
 3. Run one script: it updates the system, downloads the models, sets up the
    services and installs a small desktop control panel (a GNOME extension).
-   On a fresh machine the first run stops after a few minutes and tells you to
-   log out and back in once: that is what gives your user access to the
-   graphical processor. Run the same script again and it finishes the job.
+   On a fresh machine it stops twice, and both stops are on purpose. The first
+   comes after a few minutes and asks you to log out and back in: that is what
+   gives your user access to the graphical processor, and you then run the same
+   script again to finish the job. The second is at the very end, and it asks
+   for a **reboot**: two kernel settings take effect only after one, and the two
+   large profiles cannot load before that reboot.
 4. Open the control panel (or the terminal menu) and choose which model to
    use.
-5. Point any OpenAI-compatible app at `http://<machine>:8741` and send the API
-   key (read it with `superfast-switch api-key show`). On the machine itself,
-   `http://127.0.0.1:8731` needs no key.
+5. Point any OpenAI-compatible app at `http://<machine>:8741/v1` and send the
+   API key (read it with `superfast-switch api-key show`). On the machine
+   itself, `http://127.0.0.1:8731/v1` needs no key.
 
 ## Everyday use
 

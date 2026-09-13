@@ -51,9 +51,9 @@ ExecStartPre=-/usr/bin/podman rm -f superfast-flash
 # The last two are the request policy, and they are explicit for the same
 # reason: they are what stops a long turn from being refused or cut, and the
 # image defaults are not ours to rely on. QUEUE_TIMEOUT 3600 s is the time a
-# request waits for room in the pool before the engine answers 503; the largest
-# wait four concurrent worst-case requests can produce here is 2,386 s, and a
-# 503 would waste all of it. MAX_TOKENS_CAP 65536 is the largest answer budget
+# request waits for room in the pool before the engine answers 503; the longest
+# wait estimated here for four concurrent requests is 2,386 s, and a 503 would
+# waste all of it. MAX_TOKENS_CAP 65536 is the largest answer budget
 # a request may ask for, and it matches what the image ships; above it the
 # engine answers 400 rather than truncating. "Timeouts, and why they are what
 # they are" in the README derives the client-side values from this timeout.

@@ -38,7 +38,7 @@ What it needs, and what it does:
 | | |
 |---|---|
 | a host | Fedora Workstation 44 on AMD Strix Halo (gfx1151). It refuses anything else, and it refuses to run as root |
-| disk | about 250 GB: the checkpoints are 35.9 GB (dense), ~115 GB (Flash-Next), ~28 GB (Gemma-4), ~96 GB (DeepSeek-V4-Flash) |
+| disk | about 300 GB: the checkpoints are 35.9 GB (dense), 128.9 GB (Flash-Next, three files), 14.9 GB (Gemma-4), 102.4 GB (DeepSeek-V4-Flash) and 1.0 GB (the two orchestrator models), plus about 18 GB of container images |
 | time | hours, not minutes: the dense checkpoint alone is 35.9 GB, and the extra profiles download in the background |
 | sudo | used for the packages, the firewall, the SSH service, the groups and the kernel parameters. Passwordless for `UNATTENDED=1` |
 | it sets up | the packages and the kernel parameters, SSH, the firewalld rules (8741 open, 8731 closed), the model downloads with SHA-256 verification, the container images, the systemd units per profile, the switch, the terminal menu, the GNOME panel, and the API-key gateway |
@@ -469,7 +469,7 @@ directory**, so there is nothing to assemble by hand:
 Then point the container at both:
 
 ```bash
-podman run --rm -p 8731:8731 \
+podman run --rm -p 127.0.0.1:8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --security-opt seccomp=unconfined --ipc=host \
   -v ~/superfast-models:/models:ro \
@@ -514,7 +514,7 @@ If you do not want to download separately, set `HALOGEN_DOWNLOAD` and the
 container fetches the weights on the first start:
 
 ```bash
-podman run --rm -p 8731:8731 \
+podman run --rm -p 127.0.0.1:8731:8731 \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --security-opt seccomp=unconfined --ipc=host \
   -e HALOGEN_DOWNLOAD=peonist-ai/halogen-qwen3.8-27b \
@@ -581,7 +581,8 @@ Over the HTTP endpoint, ten prompt shapes, greedy, DFlash2 drafter:
 | MTP | 26.88 | 19.8 – 34.2 |
 | serial (no speculation) | 10.58 | — |
 
-Aggregate throughput at 8 concurrent requests: **48.6 t/s** (4.87×).
+Aggregate throughput at 8 concurrent requests: **48.6 t/s** (4.87× the 9.98 t/s
+one request gets in the same test).
 
 ### Read the range, not only the mean
 
@@ -660,8 +661,8 @@ Two things lower it in practice, both measured:
   earlier figure was measured while the machine was starved of memory, not as
   a property of the model.
 - **Two requests at once are each slower** (one of two concurrent 512-token
-  requests measured 6.4 t/s), because this profile serves four slots in
-  parallel. One client at a time gets the fast number.
+  requests measured 6.4 t/s), because this profile has a single slot and the two
+  take turns on it. One client at a time gets the fast number.
 
 One caveat, the same as Gemma-4: this model reasons at length. With a
 192-token budget, a 512-token budget and a 1024-token budget, every request we
@@ -722,8 +723,9 @@ rolled them back, because none of them changed anything:
 | `transparent_hugepage=always` | prose 23.89, code 29.49 | **no change** — reverted to `madvise` |
 
 Why nothing moved: batch-1 decode runs at the memory-bandwidth wall
-(249 GB/s against a ceiling of about 240 GB/s), and these levers change
-clocks or page granularity, not bandwidth. Prefill did not change either.
+(the decode rate implies 249 GB/s; the bandwidth tests put the ceiling at about
+240 GB/s, so the two are within a few percent of each other), and these levers
+change clocks or page granularity, not bandwidth. Prefill did not change either.
 Overclocking advice from specialists (`ppfeaturemask`/`pp_od_clk_voltage`, or
 UXTU on Windows) targets clock-limited paths. It does not apply to a
 bandwidth-limited decode workload, and it would need a kernel parameter and a
@@ -823,7 +825,8 @@ ones calibrated by somebody else, and the aggressive technique is fenced to
 prefill, where it never touches token generation.
 
 **Batch-1 decode is at the hardware wall.** 10.58 t/s × 23.51 GB per token =
-249 GB/s against a measured ceiling of 240 GB/s. No kernel win is left there
+249 GB/s implied by the decode rate, against a measured ceiling of 240 GB/s —
+the two agree to within a few percent. No kernel win is left there
 for anyone; what is left is fewer bits, better draft acceptance, and
 batching.
 
@@ -891,7 +894,8 @@ Both resume the conversation; only the dense profile promises byte-identity.
 **Batched decode** — several sequences decoded together, each byte-identical
 to running alone. The dense engine serves one request at a time by default
 (`HALOGEN_KV_SLOTS=1`) and reaches 8 concurrent sequences at 4.87× aggregate
-when you raise it; the Flash-Next engine ships 4 slots over one shared KV
+(it goes from 9.98 t/s for one request to 48.6 t/s for eight) when you raise
+it; the Flash-Next engine ships 4 slots over one shared KV
 pool. Batching trades away speculation for the streams that are not alone —
 see [Concurrency](#concurrency-and-the-one-trap) before changing it.
 
@@ -1030,6 +1034,18 @@ does ask for a full-length reply does not 503 the next request in the queue.
 Lower both together if you would rather bound how long one request can hold
 the GPU.
 
+**One shipped value is below that rule, and it is worth knowing which.** The
+dense unit sets `HALOGEN_QUEUE_TIMEOUT=6000`, not the image's 7,200: it is
+above the queue wait that unit was sized for (4,980 s — see
+[the queue-timeout note](#timeouts-and-why-they-are-what-they-are)) and below
+the 6,550 s this table derives for a full-length 65,536-token request. The
+flash unit's 3,600 s is further below it still. Both are sized for the queue
+wait their profile actually produces (4,980 s with one slot, 2,386 s with
+four), not for the 109-minute worst case the cap allows, so a request that
+does run that long can 503 whatever is queued behind it. Raising the timeout
+to match the cap is the other way to read the same table; it is a choice about
+who waits, not about correctness.
+
 Asking for more than the cap returns a **400** naming the limit. It is never
 silently truncated — but note that a truncated response and a model that
 stopped on its own both end with `finish_reason: "length"`, so a client
@@ -1089,14 +1105,19 @@ Both show up in the engine's own log. From a real session, before this was
 changed:
 
 ```
-serve_api: mtp 356 tok | prompt 120102 (30408 cached), prefill 71.20s
-serve_api: mtp 478 tok | prompt 123293 (120097 cached), prefill  4.65s
+serve_api: mtp 356 tok … | prompt 120102 (30408 cached), prefill 71.20s
+serve_api: mtp 478 tok … | prompt 123293 (120097 cached), prefill  4.65s
 ```
+
+The `…` stands for the middle of each line as the engine prints it
+(`in 17.15s = 20.76 t/s`) and for the `detok` field at the end; the rest is
+verbatim.
 
 Only the shared system prompt (30,408 tokens) was still cached; the
 conversation's own 90,000 tokens had to be prefilled again, which is the 71
-seconds. The next line is the same conversation one turn later, once its KV
-was back in place: 4.65 seconds.
+seconds — about 1,260 tokens per second, against the 709 the timeout table
+below uses as the slowest measured prefill. The next line is the same
+conversation one turn later, once its KV was back in place: 4.65 seconds.
 
 The Flash-Next unit ships a pool of 786,432 positions,
 `HALOGEN_KV_POOL_FIT=0`, an arena of 16384 and `HALOGEN_CACHE_ENTRIES=32`.
@@ -1195,11 +1216,16 @@ fifth request waits. The consequences over the same 30 hours:
   hit_rate 0.91, 214 M tokens saved). The prefix cache is keyed on the prompt
   itself, so a stateless client costs nothing as long as the beginning of the
   prompt is stable.
-- **Queueing is the cost.** 143 requests (7.5%) took more than a minute longer
-  than their own decoding needed, and the worst cases are unambiguous: a
+- **Queueing is the cost.** At least 143 requests (7.5%) took more than a minute
+  longer than their own decoding needed, and the worst cases are unambiguous: a
   20-token answer that took 280–444 s, and 65 tokens that took 272 s. That is
   not a slow model, it is a request waiting for a slot. Over the same 30 hours,
-  54% of the total wall clock was spent waiting rather than decoding.
+  at least 54% of the total wall clock was spent waiting rather than decoding.
+  Those two figures are lower bounds for a reason worth knowing: the engine's
+  own duration on its ledger line is measured from the moment it admits a
+  request, so a request that waited before admission is counted as shorter than
+  the client experienced it (see
+  [what the numbers measure](#what-the-numbers-measure)).
 - **Dropping a conversation is the other cost.** 77 requests had to prefill a
   prompt longer than 20,000 tokens from zero (mean 214 s, worst 475 s), and 21
   of those were the *same* conversation continued minutes after it had been
@@ -1372,6 +1398,27 @@ python3 tools/bench-concurrent.py 8 80000 777 1 shared    # the pool shape
 one request at a time, 11–30-token prompts, byte-identical output checked. The
 two are not interchangeable, and neither replaces the other.
 
+#### What the numbers measure
+
+Every table above that quotes a wall clock uses **the client's own
+measurement**: from sending the request to receiving the last token, including
+any time spent waiting before the engine admits it. The engine's ledger line
+measures from admission, so it can be shorter, and on a loaded machine it
+usually is. Both are honest; they answer different questions, and mixing them
+is how the same run can look like two different runs.
+
+- A request that sat in the queue shows the gap plainly: one measured
+  `20 tok in 295.93s = 0.07 t/s` with a prefill of 10.29 s, which leaves about
+  285 s that can only be waiting.
+- In the eight-client runs above, a client's wall clock is up to ~30 s longer
+  than the engine's own duration for the same request, and that difference
+  disappears in the second, cache-warm run.
+
+This is also why the two waiting figures in
+[what a real fleet looks like](#what-a-real-fleet-looks-like-on-this-pool) are
+stated as lower bounds: they are derived from the engine's ledger, which does
+not count the wait it never saw.
+
 ### Watch a busy machine
 
 The engine's log says how long each request took, but not how many were
@@ -1379,7 +1426,7 @@ waiting, and on a machine with several agents that is the difference between an
 answer that is slow and an answer that is queued. `superfast-monitor.timer`
 closes that gap: every 30 seconds it reads the engine's `/health` and `/cache`,
 the GPU counters and the memory, and appends one line to
-`~/.local/share/superfast-monitor/samples.jsonl` (rotating at 20 MB). The setup
+`~/.local/share/superfast-monitor/samples.jsonl` (rotating at 20 MiB). The setup
 script installs and starts it; nothing has to be enabled by hand.
 
 ```bash
@@ -1533,7 +1580,7 @@ They are the vendors' own measurements on the instruction-tuned versions.
 | SWE-bench Pro | **61.7** | not published |
 | Terminal-Bench 2.1 | **73.0** | not published |
 | MMLU Pro | not published | 82.6 |
-| AIME 2026 | not published | 88.3 |
+| AIME 2026 | 29/30 (96.7%) in the next section — not on the vendor's card | 88.3 |
 | active parameters | 27 B (all) | 3.8 B (of 25.2 B) |
 | context | 262,144 tokens | 256,000 tokens |
 | license | Apache-2.0 | Apache-2.0 |
@@ -1646,7 +1693,8 @@ subsection covers it.
 **Where it is strong.** Agentic coding and instruction following: it is ahead
 of Claude Opus 4.6 Max on SWE-bench Pro, DeepSWE 1.1, CoWorkBench and
 IFBench, and it answers faster than the paid models compared here (about
-190 ms to the first token, against about 1.4 s for GPT-5.6 Luna).
+190 ms to the first token, against about 1.4 s for GPT-5.6 Luna — published
+figures like the rest of this section, not measured on this machine).
 
 **Where it is weaker.** Terminal work and the hardest knowledge questions:
 Claude Opus 4.6 Max is ahead on Terminal-Bench 2.1, GPQA Diamond and HLE.
@@ -2003,10 +2051,13 @@ Three properties that matter when a program uses this machine as its model:
   the generation down to about 0.4 tokens per second and the machine using
   105 GB of its 124 GB. Treat that profile as a long-context text model, not
   an agentic one.
-- **Give the thinking profiles room.** Gemma-4 and DeepSeek-V4-Flash spend
-  their whole budget on reasoning when the budget is small — measured at 192,
-  512 and 1024 tokens — so a client should send a large `max_tokens` with
-  them, or the answer comes back empty with `finish_reason: "length"`.
+- **Give the thinking profiles room.** Both spend their whole budget on
+  reasoning when the budget is small, and the answer comes back empty with
+  `finish_reason: "length"`. Measured, per model: with **DeepSeek-V4-Flash**, at
+  192, 512 and 1024 tokens every request spent the whole budget on reasoning;
+  with **Gemma-4**, a 256-token budget came back empty and 1024 produced a
+  normal answer, which is why its measured row uses 512. Send a large
+  `max_tokens` with both.
 
 Why DeepSeek ships 512K and not its full 1M: both were measured. At 1M the
 machine has about 7 GB of free memory left, and long generations then stall —
@@ -2059,27 +2110,41 @@ Two limits that only show up in long agentic sessions:
   [Many agents at once](#many-agents-at-once). Qwen Code shows the cache work
   in `/stats`.
 
-A working entry for Qwen Code (`~/.qwen/settings.json`), the flash profile,
-tuned for coding:
+A working `~/.qwen/settings.json`, with the flash profile filled in.
+`modelProviders` is an object, its keys are provider ids and each key holds an
+array of models. Every profile on this machine speaks the OpenAI-compatible
+protocol, so they all go under the `openai` key. A file Qwen Code has already
+written carries other keys as well: add these entries to it instead of replacing
+it.
 
 ```json
 {
-  "id": "halogen-qwen3.8-flash-next",
-  "name": "[SUPERFAST] flash profile (MoE 125B) - coding",
-  "baseUrl": "http://<machine-ip>:8741/v1",
-  "envKey": "SUPERFAST_API_KEY",
-  "generationConfig": {
-    "timeout": 6000000,
-    "streamIdleTimeoutMs": 4200000,
-    "maxRetries": 1,
-    "contextWindowSize": 262144,
-    "extra_body": { "reasoning_effort": "low" },
-    "samplingParams": { "max_tokens": 16384 }
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "halogen-qwen3.8-flash-next",
+        "name": "[SUPERFAST] flash profile (MoE 125B) - coding",
+        "baseUrl": "http://<machine-ip>:8741/v1",
+        "envKey": "SUPERFAST_API_KEY",
+        "generationConfig": {
+          "timeout": 6000000,
+          "streamIdleTimeoutMs": 4200000,
+          "maxRetries": 1,
+          "contextWindowSize": 262144,
+          "extra_body": { "reasoning_effort": "low" },
+          "samplingParams": { "max_tokens": 16384 }
+        }
+      }
+    ]
   }
 }
 ```
 
-Repeat the block once per profile with the values below. `id` is what the
+Add the other profiles as further objects in the same array, using the values in
+the table below, and keep only the ones you use. Two entries that share both an
+`id` and a `baseUrl` are the same entry, and the second one is ignored, so that
+pair is also how you keep one model twice with different settings (thinking on
+and thinking off, for example, with `/v1` on one of them). `id` is what the
 client sends as the model name, so it must match what `/health` reports, and
 `contextWindowSize` must match the window the profile allocates:
 
@@ -2089,6 +2154,15 @@ client sends as the model name, so it must match what `/health` reports, and
 | Dense 27B | `halogen-qwen3.8-27b` | 262,144 | 16,384 | 7,200,000 | 9,000,000 | leave unset | `{"reasoning_effort":"low"}` |
 | Gemma-4-26B | `gemma-4-26b-a4b` | 262,144 | 32,768 | 3,600,000 | 4,800,000 | **0** | none, the profile ignores it |
 | DeepSeek-V4-Flash | `deepseek-v4-flash` | 524,288 | 16,384 | 8,400,000 | 10,800,000 | **0** | none, the profile ignores it |
+
+Before you rely on it, check the three things a wrong setting hides: that the
+gateway answers with your key, that the model name you configured is one of the
+ids it lists, and that the profile you expect is the one running.
+
+```bash
+curl -s http://<machine-ip>:8741/v1/models -H "Authorization: Bearer <key>"
+superfast-switch status        # on the machine: which profile is serving
+```
 
 Both timeouts are milliseconds, and they are not round numbers by accident:
 each one is the worst case of that profile — the largest prompt it serves, the
@@ -2174,10 +2248,14 @@ the work.
 
 Three consequences worth knowing:
 
-- **The engine's own timeout is set to match.** `HALOGEN_QUEUE_TIMEOUT` is
-  6000 s on dense (four worst-case requests are 4,980 s) and 3600 s on flash.
-  It should never fire: a request that waits that long is one the machine
-  cannot serve, and a 503 wastes everything already queued.
+- **The engine's own timeout is set to match, and deliberately.**
+  `HALOGEN_QUEUE_TIMEOUT` is 6000 s on dense and 3600 s on flash: above the
+  longest queue wait estimated for each profile (4,980 s with one slot, 2,386 s
+  with four), and below what the table above allows in the absolute worst case,
+  where three worst-case requests ahead of you would exceed either value. It
+  exists to stop a client waiting forever, not to bound the queue. It should
+  never fire: a request that waits that long is one the machine cannot serve,
+  and a 503 wastes everything already queued.
 - **llama.cpp has a timeout of its own**, `--timeout`, 600 s by default, on the
   *socket*. The gemma and deepseek units raise it (1800 s and 3600 s) because
   their prefills are long enough to trip the default — see the comments in
@@ -2348,10 +2426,15 @@ build-outs find harder to justify.
 
 ## License
 
-Free for any use, including commercial. Unmodified redistribution permitted.
-Benchmark publication expressly permitted. See [`LICENSE`](LICENSE.md) and
-[`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES.md), both also at `/licenses`
-inside the image.
+The engine is licensed by Peonist: free for any use, including commercial use,
+unmodified redistribution permitted, and benchmark publication expressly
+permitted. See [`LICENSE.md`](LICENSE.md), the engine's End User License
+Agreement — it covers the engine binary, its serving front-end and the
+container packaging. **This repository's own files — the installer, the tools,
+the documentation — are not covered by it.** For what is redistributed inside
+the images (ROCm and the rest) see
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md); the images ship the same two
+documents as `/licenses/EULA.md` and `/licenses/THIRD-PARTY-NOTICES.md`.
 
 **Model weights are not included and are not covered** by that license. They
 are obtained separately and are licensed by their original authors.
