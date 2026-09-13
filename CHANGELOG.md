@@ -61,6 +61,28 @@
   tables it produced, and the startup measurements they led to, are in the
   README under "Many agents at once".
 
+### Changed
+
+- **The flash profile ships a 786,432-position KV pool instead of
+  1,048,576.** With 1,048,576 and `HALOGEN_KV_POOL_FIT=0` — what this project
+  shipped until tonight — the engine **stops starting** on a host that has been
+  running for a while: it reaches `model ready`, prints `reserving 3 more
+  serving slot(s)`, and then spins at 80-90% of a core forever without ever
+  listening, with no error for anyone to report. Three attempts, three hangs;
+  the startup log shows only 140-312 MiB of the engine's contiguous 2 MiB
+  blocks left for three slots that want ~333 MiB, and the engine livelocks in
+  the allocator instead of failing, so `Restart=on-failure` never fires and the
+  machine simply stops serving. 786,432 started on all three attempts with the
+  same arena and cache that ship beside it, and it holds four 150K-token
+  conversations with a 16K answer budget — the shape an agent actually has.
+- **Four slots stay four, and the pool is no longer described as a speed knob.**
+  Measured with eight concurrent clients: halving the pool (786432 → 524288)
+  changed nothing (33.8 against 35.5 t/s aggregate), because with more clients
+  than slots it is the slots that decide. Eight slots raise aggregate
+  throughput 20% (72.2 → 86.5 t/s) and lower every individual client's rate by
+  20% (13.53 → 10.84 t/s), so the profile keeps four: an agent feels its own
+  latency, not the fleet's aggregate.
+
 ### Fixed
 
 - **The sampler cancelled `/cache` on a busy engine.** Its 15-second timeout

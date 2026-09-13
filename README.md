@@ -991,12 +991,14 @@ across *all* conversations; each request reserves `prompt + max_tokens` of it,
 and one that does not fit **waits**. The image default is twice the context,
 524,288 — two full-length conversations, or four at 131K. The pool must be at
 least `HALOGEN_CTX`, or the engine refuses it (`at least --ctx 262144, a
-multiple of 256, at most 16777216`), and a larger one is silently shrunk at
-startup unless `HALOGEN_KV_POOL_FIT=0`. The unit in `deploy/profiles/` ships a
-1,048,576-position pool for exactly that reason, with `HALOGEN_MAX_TOK=16384`
-— the prefill arena, which has to halve for a pool that size to fit. See
-[Many agents at once](#many-agents-at-once) for the measurements and for how
-to put the image defaults back.
+multiple of 256, at most 16777216`), and a larger one is shrunk at startup
+unless `HALOGEN_KV_POOL_FIT=0`. The unit in `deploy/profiles/` ships a
+**786,432**-position pool with `HALOGEN_MAX_TOK=16384` — the prefill arena,
+which has to halve for a pool that size to fit. 786,432 is not a tuning
+preference: it is the largest value measured to start **reliably**, because
+1,048,576 livelocks the engine at startup on a host that has been running for a
+while. See [Many agents at once](#many-agents-at-once) for that measurement and
+for how to put the image defaults back.
 
 On both engines the drafter speculates only while a stream is alone: with
 several streams live, decode is batched instead. That is why a single user
@@ -1096,13 +1098,14 @@ conversation's own 90,000 tokens had to be prefilled again, which is the 71
 seconds. The next line is the same conversation one turn later, once its KV
 was back in place: 4.65 seconds.
 
-The Flash-Next unit now ships a pool of 1,048,576 positions,
+The Flash-Next unit ships a pool of 786,432 positions,
 `HALOGEN_KV_POOL_FIT=0`, an arena of 16384 and `HALOGEN_CACHE_ENTRIES=32`.
 Measured on the reference host with four agents asking **at the same time**,
 each carrying 139,541 tokens of history and `max_tokens: 8192` — 560,000
-positions of KV between them, more than the 524,288 the image's pool holds:
+positions of KV between them, more than the 524,288 the image's pool holds and
+inside the 786,432 that ships today:
 
-| four concurrent agents, 139.5K tokens each | image defaults, pool 524288 | this unit, pool 1048576 |
+| four concurrent agents, 139.5K tokens each | image defaults, pool 524288 | this unit's pool (786,432, and the 1,048,576 this was first measured on) |
 |---|---|---|
 | first turn, all four | 533.8 s | 419.2 s |
 | follow-up turn, all four | 229.5 s | **2.2 s** |
@@ -1110,11 +1113,15 @@ positions of KV between them, more than the 524,288 the image's pool holds:
 | prefill of the follow-up, per agent | 0.44 s twice, then 119.53 s and 108.53 s | 0.44 s four times |
 
 So on the defaults two of the four agents pay for their whole history again,
-and none does with the larger pool. That is the same failure the real session
-above shows at 120K, and it is what the pool is for: 524,288 positions is
-about four conversations of 131,072 tokens, which is why this went unnoticed
-— four agents at 90,000 tokens are 360,000 positions and fit — and why it
-starts to hurt on longer sessions.
+and none does with the larger pool — and 786,432 is enough for it, because four
+agents at 139.5K with an 8,192-token budget reserve 590,000 positions. What the
+pool cannot do is hold four conversations of 200,000 tokens or more: that would
+need 1,048,576, which no longer starts here (see
+[the startup table](#the-pool-also-decides-whether-the-engine-starts)). That is
+the same failure the real session above shows at 120K, and it is what the pool
+is for: 524,288 positions is about four conversations of 131,072 tokens, which
+is why this went unnoticed — four agents at 90,000 tokens are 360,000 positions
+and fit — and why it starts to hurt on longer sessions.
 
 The engine prints the cache it armed at startup — `prompt cache ON,
 resume-anywhere (8 entries, …)` on the image defaults, `(32 entries, …)` from
@@ -1131,14 +1138,16 @@ Four things to know if you tune it:
   across turns, with volatile content (the clock, command output) at the end. A
   subagent whose system prompt differs from its siblings' shares nothing with
   them and starts cold by construction — that is expected, not a bug.
-- **The sizes are one budget, not four knobs.** A 1,048,576-position pool fits
-  only with the prefill arena at 16384, and the engine enforces the
-  relationships (pool at least the context, arena at most 32768).
-- **A bigger pool costs memory the model also wants.** 1,048,576 positions is
-  ~29.3 GiB against ~14.9 GiB for the default, measured with 72 GB still
-  available and the model resident. If you would rather keep the memory,
-  786432 (three full-length conversations) also starts and needs no arena
-  change.
+- **The sizes are one budget, not four knobs.** A pool this size fits only with
+  the prefill arena at 16384 — the arena is not a second answer budget — and the
+  engine enforces the relationships (pool at least the context, arena at most
+  32768). Raising the pool without checking the arena is one way to get a
+  profile that will not start.
+- **A bigger pool costs memory the model also wants, and can cost the engine
+  itself.** 786,432 positions is ~22 GiB against ~14.9 GiB for the image
+  default, and 1,048,576 is ~29 GiB which, measured on 2026-09-13, no longer
+  starts on this host. If you want a pool larger than 786,432, change it,
+  restart, and read the startup line: do not assume it comes up.
 - **Do not reach for the disk.** `HALOGEN_CACHE_FILE` exists, but only with
   `HALOGEN_CACHE_INPLACE=0`, where each entry copies the whole KV (~26 KiB per
   position, ~6.5 GB at the native context). On this machine the host RAM is the
@@ -1149,18 +1158,24 @@ Four things to know if you tune it:
 To go back to the image defaults, delete the six `-e HALOGEN_*` lines from the
 `ExecStart` in `~/.config/systemd/user/superfast-flash.service` and run
 `systemctl --user daemon-reload && systemctl --user restart superfast-flash`;
-the engine then sizes everything itself, including the pool. To keep the fix
-but use less memory, set `HALOGEN_KV_POOL_POSITIONS=786432` and drop
-`HALOGEN_MAX_TOK` so the arena returns to 32768.
+the engine then sizes everything itself, including the pool. To keep the fix but
+use less memory, lower `HALOGEN_KV_POOL_POSITIONS`: 524,288 measured the same
+throughput as 786,432 (35.5 against 33.8 t/s aggregate) and costs about 7 GiB
+less, at the price of holding three 150K-token conversations instead of four.
 
 #### What a real fleet looks like on this pool
 
 The table above measures four agents at 139,541 tokens. Agents in practice run
 longer conversations than that, and the pool is a budget, so it is worth
-knowing what it does when the sessions grow. These figures were read out of the
-engine's own log on the reference host over 30 hours of ordinary use, with the
-[sampler](#watch-a-busy-machine) recording alongside it (2,029 requests, one
-client, all answered 200, no restarts):
+knowing what it does when the sessions grow. Everything in this section was
+measured on the reference host on 2026-09-13, in three ways: 30 hours of the
+engine's own log from ordinary agent use, a live four-agent test with the
+[sampler](#watch-a-busy-machine) recording beside it, and
+[`tools/bench-concurrent.py`](#benchmark-several-agents-at-once), which was
+written for it.
+
+**From 30 hours of ordinary use** (2,029 requests, one client, all answered
+200, no restarts):
 
 | conversations decoding at once | tokens/s per conversation |
 |---|---|
@@ -1171,11 +1186,7 @@ client, all answered 200, no restarts):
 | more than 4 | 12–14 (the extra requests queue for a slot) |
 
 Read the first column as slots, not as clients: the profile has four, and a
-fifth request waits for room in the pool. On this fleet the sessions were
-150,000–225,000 tokens long with the client's 32,768-token answer budget, so
-each request reserved 180,000–260,000 positions and four of them came to
-1.02–1.05 million — the pool, exactly. The consequences, measured over the same
-30 hours:
+fifth request waits. The consequences over the same 30 hours:
 
 - **The prompt cache is not the problem, and it does work.** 94.9% of all
   prompt tokens were served from cache (`/cache`: 1,791 hits, 173 misses,
@@ -1183,10 +1194,10 @@ each request reserved 180,000–260,000 positions and four of them came to
   itself, so a stateless client costs nothing as long as the beginning of the
   prompt is stable.
 - **Queueing is the cost.** 143 requests (7.5%) took more than a minute longer
-  than their own decoding needed, and the worst cases are unambiguous: a 20-token
-  answer that took 280–444 s, and 65 tokens that took 272 s. That is not a slow
-  model, it is a request waiting for a slot. On the same 30 hours, 54% of the
-  total wall clock was spent waiting rather than decoding.
+  than their own decoding needed, and the worst cases are unambiguous: a
+  20-token answer that took 280–444 s, and 65 tokens that took 272 s. That is
+  not a slow model, it is a request waiting for a slot. Over the same 30 hours,
+  54% of the total wall clock was spent waiting rather than decoding.
 - **Dropping a conversation is the other cost.** 77 requests had to prefill a
   prompt longer than 20,000 tokens from zero (mean 214 s, worst 475 s), and 21
   of those were the *same* conversation continued minutes after it had been
@@ -1195,13 +1206,108 @@ each request reserved 180,000–260,000 positions and four of them came to
   times, once an hour, always while a long request was in flight. The kill
   threshold is 180 s and was never reached, so this is a symptom of a busy
   engine, not of a stuck one.
-- **The fix is fewer positions per request, not a bigger pool.** A request with
-  a 16,384-token answer budget instead of 32,768 reserves 16,384 positions less,
-  and four long conversations then fit with room to spare. Raising
-  `HALOGEN_KV_POOL_POSITIONS` to 1,572,864 is the other option, but the pool is
-  the only term here that can shrink: on a machine already holding ~68 GiB of
-  weights and ~11 GiB of scratch, that value leaves a few GiB of headroom,
-  against the ~26 GiB this fleet runs with today.
+
+**From the live four-agent test**, where two agents were coding and two were
+driving the same endpoint from different clients: a 777-token answer with a
+fully cached prefix (prefill 0.1 s, 100% cache) took **141 s** on one client and
+**51 s** on the identical one sent at the same moment; a single agent that had
+to re-prefill a 221,000-token context paid **351 s** of prefill while six other
+requests were in flight; and the first turn of an agent that only wanted to
+write its first file had not completed after **14 minutes**. The sampler shows
+what the engine thinks it is doing: `in_flight` 4 with `queued` 2, and the GPU
+only 61% busy on average while four conversations were open.
+
+#### The pool is a residency budget, not a speed knob
+
+[`tools/bench-concurrent.py`](#benchmark-several-agents-at-once) fires N clients
+at the same time, in one of two modes, and reads each request's own numbers out
+of the engine's log. The two shapes below differ in what they can stress:
+`8 × 30K` reservations all fit any pool, so only slot arbitration can make a
+client wait; `8 × 80K` asks for ~646K positions, which does not fit the
+image-default pool.
+
+| configuration | shape | aggregate | per client | mean wall | cache hit |
+|---|---|---|---|---|---|
+| pool **786432**, 4 slots | 8 × 80K | 33.8 t/s | 4.97 t/s | 159.9 s | 87% |
+| pool **786432**, 4 slots | 8 × 30K, run 1 | 53.7 t/s | 8.70 t/s | 94.2 s | 87% |
+| pool **786432**, 4 slots | 8 × 30K, run 2 | 72.2 t/s | 13.53 t/s | 64.6 s | 100% |
+| pool 524288 (engine-fitted), 4 slots | 8 × 80K | 35.5 t/s | 5.28 t/s | 151.0 s | 87% |
+| pool **786432**, **8 slots** | 8 × 30K, run 1 | 59.5 t/s | 7.45 t/s | 104.3 s | 87% |
+| pool **786432**, **8 slots** | 8 × 30K, run 2 | **86.5 t/s** | 10.84 t/s | 71.7 s | 100% |
+
+What the table says, and what decided the shipped values:
+
+- **The pool is not what is slow.** Halving it (786432 → 524288) measured
+  35.5 t/s aggregate against 33.8 — the same, within noise. With eight clients
+  the binding constraint is the four slots, not the positions. So the pool is
+  shipped for *residency* (how many long conversations stay warm) and its size
+  is set by that, not by speed.
+- **Eight slots buy throughput and cost latency.** All eight conversations
+  decode at once: aggregate rises 20% (72.2 → 86.5 t/s) while each client's own
+  rate falls 20% (13.53 → 10.84 t/s) and its answer arrives later (64.6 →
+  71.7 s). An interactive agent feels the second number, so the profile keeps
+  four slots.
+- **The second run is always faster than the first**, and the reason is in the
+  table: the shared prefix is already in the prompt cache (prefill 0.1 s, 100%
+  cache hit), so the second batch of eight pays no prefill at all.
+
+#### The pool also decides whether the engine starts
+
+The number that turned out to matter most is not a speed number at all. With
+`HALOGEN_KV_POOL_POSITIONS=1048576` and `HALOGEN_KV_POOL_FIT=0` — what this
+project shipped until 2026-09-13 — **the engine stops starting on a host that
+has been running for a while**:
+
+| pool | `FIT` | what happened |
+|---|---|---|
+| 1048576 | 0 | reaches `model ready`, then `reserving 3 more serving slot(s)`, then spins at 80–90% of a core **forever**: no listening socket, no error, three attempts |
+| 1048576 | 1 | serves in 75 s, and the engine arms **524288** — it halved the request |
+| 786432 | 0 | serves, arms 786432: three verified starts, and what the unit now ships |
+| 786432 | 1 | arms 786432 when it starts; one attempt livelocked and exited after 594 s |
+
+The startup log explains it: after reserving the pool, only 140–312 MiB of the
+engine's contiguous 2 MiB blocks are left, and the three remaining serving slots
+want ~333 MiB (4 × 111 MiB). The engine does not fail when it cannot find them —
+it spins, so `Restart=on-failure` never fires and the machine simply stops
+serving. Two lessons are in the shipped unit because of this: ask for a pool the
+host can back (786432), and check the startup line rather than the port, because
+a hung engine holds the port's process without ever listening on it.
+
+If it happens to you: `journalctl --user -u superfast-flash` shows `model ready`
+followed by `reserving ... slot(s)`, `ps` shows `flash_serve` at 80%+ of a core,
+and waiting does not help. Lower `HALOGEN_KV_POOL_POSITIONS`, or reboot the host
+to give the engine unfragmented memory again.
+
+### Benchmark several agents at once
+
+`tools/bench-concurrent.py` is the instrument behind the tables above. It runs
+on the machine and takes clients, prefix length, answer budget, repeats and a
+mode:
+
+```bash
+python3 tools/bench-concurrent.py 8 30000 777 2 shared    # the slot shape
+python3 tools/bench-concurrent.py 8 80000 777 1 shared    # the pool shape
+```
+
+- `shared` sends every client the same prefix, like subagents sharing one system
+  prompt and tool set; `distinct` gives every client its own, which is the worst
+  case for prefill.
+- It reports, per request, the wall clock it measured itself and the engine's
+  own numbers for that request (prompt, cached, prefill) taken from the
+  engine's ledger lines. Recognising which ledger lines are its own is the
+  whole difficulty of measuring a live box, and it is done with a fingerprint —
+  a distinctive `max_tokens` plus the prompt length each client reports — after
+  two other approaches were tried and failed on this machine: counting log tail
+  lines (the window scrolls, and live agents' requests get counted as yours) and
+  tagging requests with the non-speculative `serial` drafter (which prints no
+  ledger line at all).
+- It also reports the aggregate: tokens per second across all clients, which is
+  the number that says whether the machine is being used well, next to the
+  per-client rate that says whether one agent feels fast.
+
+`tools/bench-serving.py` remains the benchmark of record for *drafter* speed —
+one request at a time, 11–30-token prompts, byte-identical output checked. The
+two are not interchangeable, and neither replaces the other.
 
 ### Watch a busy machine
 

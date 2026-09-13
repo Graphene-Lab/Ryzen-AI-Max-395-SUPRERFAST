@@ -54,9 +54,9 @@ conversations stay resident at once:
 
 | setting | value | why |
 |---|---|---|
-| `HALOGEN_KV_POOL_POSITIONS` | `1048576` | positions resident across **all** conversations. The image default is 524288 (two full-length conversations); a client that opens subagents needs more, and each request reserves `prompt + max_tokens` of it |
-| `HALOGEN_KV_POOL_FIT` | `0` | without it the engine shrinks the pool at startup — a pool requested as 1048576 came up as 524288, so the setting did nothing |
-| `HALOGEN_MAX_TOK` | `16384` | the prefill arena (not the answer budget). A 1,048,576-position pool fits only with the arena halved; longer prompts are prefilled in arena-sized pieces |
+| `HALOGEN_KV_POOL_POSITIONS` | `786432` | positions resident across **all** conversations. The image default is 524288 (two full-length conversations); a client that opens subagents needs more, and each request reserves `prompt + max_tokens` of it. 786432 is the largest value measured to **start reliably**: with 1048576 the engine reaches `model ready` and then spins forever in the serving-slot allocation, with no error and no listening socket (measured 2026-09-13; the table is in the README) |
+| `HALOGEN_KV_POOL_FIT` | `0` | without it the engine shrinks the pool at startup — a pool requested as 1048576 came up as 524288, so the setting did nothing. `0` is safe here because the shipped 786432 is a value the host has been measured to back |
+| `HALOGEN_MAX_TOK` | `16384` | the prefill arena (not the answer budget). The pool above fits only with the arena halved; longer prompts are prefilled in arena-sized pieces |
 | `HALOGEN_CACHE_ENTRIES` | `32` | conversations whose resumable state the cache keeps. The image ships 8; 32 leaves headroom for a client that opens subagents. ~111 MiB each |
 | `HALOGEN_KV_SLOTS` / `HALOGEN_CTX` | `4` / `262144` | explicit rather than inherited, so what the unit runs with is readable in the unit |
 | `HALOGEN_QUEUE_TIMEOUT` | `3600` | seconds a request waits for room in the pool before the engine answers 503. Four concurrent worst-case requests are 2,386 s here, and a 503 throws away the work already queued. The dense unit ships 6000 for the same reason (one slot, four requests, 4,980 s) |

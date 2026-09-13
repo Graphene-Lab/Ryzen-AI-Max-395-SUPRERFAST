@@ -14,14 +14,13 @@ ExecStartPre=-/usr/bin/podman rm -f superfast-flash
 # These six values are one budget, and they are what lets several agent
 # conversations stay resident instead of re-prefilling their whole history:
 #   KV_SLOTS x CTX     what one request may use, 4 x 262144.
-#   KV_POOL_POSITIONS  positions resident across ALL conversations. The image
-#                      default is 2 x CTX (524288), which holds two
-#                      full-length conversations; 1048576 holds four, which is
-#                      what a client that opens subagents needs. The engine
-#                      refuses a pool smaller than CTX.
+#   KV_POOL_POSITIONS  positions resident across ALL conversations. 786432 is
+#                      three full-length conversations, or four of the ~150K
+#                      ones an agent actually carries; each request reserves
+#                      prompt + max_tokens of it.
 #   KV_POOL_FIT=0      do not shrink the pool at startup. Left at its default
-#                      the engine fitted 1048576 back down to 524288, so the
-#                      setting had no effect at all.
+#                      the engine fitted a request for 1048576 back down to
+#                      524288, so the setting had no effect at all.
 #   MAX_TOK=16384      the single-call prefill arena. This pool only fits with
 #                      the arena halved; longer prompts are prefilled in
 #                      arena-sized pieces, which is what makes a large context
@@ -29,11 +28,20 @@ ExecStartPre=-/usr/bin/podman rm -f superfast-flash
 #   CACHE_ENTRIES=32   how many conversations keep their resumable state. The
 #                      image ships 8; 32 leaves headroom for a client that opens
 #                      subagents. Each entry costs ~111 MiB.
-# Measured with four agents asking at once, each at 139,541 tokens: on the
-# image defaults the follow-up turn takes 229.5 s, because two of the four
-# re-prefill their whole history; with this pool all four are served from cache
-# and the whole turn takes 2.2 s. The numbers and the rollback are in the
-# README under "Many agents at once".
+#
+# WHY 786432 AND NOT 1048576, measured 2026-09-13: with 1048576 and FIT=0 the
+# engine no longer starts on a host that has been running for a while. It
+# reaches "model ready", prints "reserving 3 more serving slot(s)", and then
+# spins at 80-90% of a core forever without listening — three attempts, no
+# error, and `Restart=on-failure` cannot help because the process never exits.
+# The startup log says why: after reserving the pool, only ~140-312 MiB of the
+# engine's contiguous 2 MiB blocks are left, and the three remaining slots want
+# ~333 MiB (4 x 111 MiB). 786432 starts reliably (three verified starts) and
+# holds four 150K-token conversations with a 16K answer budget (~664K positions
+# of reservations). What the pool does NOT buy is throughput: eight concurrent
+# clients measured 33.8 t/s aggregate against a fitted 524288's 35.5 t/s, so the
+# pool is a residency budget, not a speed knob. The numbers are in the README
+# under "Many agents at once".
 #
 # The last two are the request policy, and they are explicit for the same
 # reason: they are what stops a long turn from being refused or cut, and the
@@ -49,7 +57,7 @@ ExecStart=/usr/bin/podman run --name superfast-flash --rm -p 127.0.0.1:8731:8731
   --security-opt seccomp=unconfined --ipc=host \
   -e HALOGEN_KV_SLOTS=4 \
   -e HALOGEN_CTX=262144 \
-  -e HALOGEN_KV_POOL_POSITIONS=1048576 \
+  -e HALOGEN_KV_POOL_POSITIONS=786432 \
   -e HALOGEN_KV_POOL_FIT=0 \
   -e HALOGEN_MAX_TOK=16384 \
   -e HALOGEN_CACHE_ENTRIES=32 \
