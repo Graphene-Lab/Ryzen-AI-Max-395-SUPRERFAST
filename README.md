@@ -10,6 +10,16 @@
 
 **Run a high-quality open LLM on an AMD Ryzen AI Max machine: fast, and in private.**
 
+**The flash profile is the headline: a 125-billion-parameter model, answering
+at 37–46 tokens per second, on one desktop machine.** It is a
+mixture-of-experts model, so it holds 125 billion parameters and uses only 6
+billion of them for each token, which is what makes it fast on hardware this
+size. Its checkpoint is 128.9 GB on disk (three files) and about 45 GB resident,
+so it needs the machine's 124 GB of unified memory as a single pool. A model of
+this class is normally reached through a rented API, or served from several
+data-centre GPUs; here it runs at home, and nothing you send it leaves the
+machine.
+
 ## Install a machine
 
 `deploy/setup-fedora.sh` is the installer: a fresh Fedora Workstation 44 host
@@ -759,7 +769,11 @@ Qwen3.8-Flash-Next belongs to the same family but uses a mixture-of-experts
 design. It holds far more parameters in total, but for each single token only
 a small subset of its experts is active. Reading fewer weights per token
 means more tokens per second on the same memory bandwidth. This is why a
-larger model can be the faster model on this kind of hardware.
+larger model can be the faster model on this kind of hardware, and it is also
+why Flash-Next is the profile this project is built around: **125 billion
+parameters on a desktop machine that sits at home, at the speed the table
+above reports**, is what makes running this class of model yourself practical
+rather than a demonstration.
 
 The published checkpoints for the engine support this with three files. The
 main one is the 4-bit MoE checkpoint. Beside it there is a quality overlay,
