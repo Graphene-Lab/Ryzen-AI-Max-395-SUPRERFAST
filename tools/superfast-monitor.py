@@ -12,10 +12,13 @@ active profile — whichever one that is.
 
 Why it exists: the engine's own log says how long each request took, but not
 how many were waiting. On a machine with several agents that is the difference
-between a slow answer and a queued one, and only the second is a configuration
-problem: `/health`'s `in_flight` and `queued` are the numbers to watch. The
-figures this tool collected on the reference host are in the README under
-"Many agents at once".
+between a slow answer and a queued one, and the queue is the part that says
+something about the machine rather than about the model: `/health`'s `in_flight`
+and `queued` are the numbers to watch. A queue can come from the KV pool being
+full or from more conversations than the profile has slots, and `/health` does
+not distinguish them — see what the report says about each. The figures this
+tool collected on the reference host are in the README under "Many agents at
+once".
 """
 
 import datetime
@@ -140,23 +143,30 @@ def report(hours):
         sum(1 for v in queued if v), 100.0 * sum(1 for v in queued if v) / len(rows),
         max(queued)))
     print("peak busy_for_s: %.0f s (longest single request in flight)" % max(col("busy_for_s")))
-    print("a request that is queued is waiting for room in the KV pool; queued > 0")
-    print("for long stretches means the pool is smaller than the working set.")
+    print("a request that is queued is waiting, either for room in the KV pool or")
+    print("for one of the profile's slots to free: `/health` does not say which, and")
+    print("the depth and duration of the queue is what tells them apart.")
 
     hits = col("cache_hits")
     misses = col("cache_misses")
-    tot = (hits[-1] - hits[0]) + (misses[-1] - misses[0])
+    tot = max(0, hits[-1] - hits[0]) + max(0, misses[-1] - misses[0])
     print("\n--- prompt cache (delta over the window) ---")
+    if hits[-1] < hits[0] or misses[-1] < misses[0]:
+        # The engine counts from zero every time it starts, so a window that
+        # contains a profile switch or a restart carries a reset. A negative
+        # delta is not a counter bug and must not be reported as one.
+        print("counters reset in this window (a profile restart): the figures below")
+        print("are what accumulated since the last start, not the whole window")
     if tot:
         print("requests %d, hits %d, misses %d, hit rate %.2f%%" % (
-            tot, hits[-1] - hits[0], misses[-1] - misses[0],
-            100.0 * (hits[-1] - hits[0]) / tot))
-    print("prompt tokens served from cache: %d" % (col("cache_prompt_tokens_saved")[-1] -
-                                                   col("cache_prompt_tokens_saved")[0]))
+            tot, max(0, hits[-1] - hits[0]), max(0, misses[-1] - misses[0]),
+            100.0 * max(0, hits[-1] - hits[0]) / tot))
+    print("prompt tokens served from cache: %d" % max(
+        0, col("cache_prompt_tokens_saved")[-1] - col("cache_prompt_tokens_saved")[0]))
     print("snapshots stored %d, evicted %d, entries now %s" % (
-        col("cache_stores")[-1] - col("cache_stores")[0],
-        col("cache_evicted")[-1] - col("cache_evicted")[0], rows[-1].get("cache_entries")))
-    print("a restart of the profile empties this cache: the engine is new.")
+        max(0, col("cache_stores")[-1] - col("cache_stores")[0]),
+        max(0, col("cache_evicted")[-1] - col("cache_evicted")[0]),
+        rows[-1].get("cache_entries")))
 
     print("\n--- GPU and memory ---")
     print("gpu busy mean %.0f%%, max %d%%   gtt %d MB   temp %.0f C   power %.0f W" % (

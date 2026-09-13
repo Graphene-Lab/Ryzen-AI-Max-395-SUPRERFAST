@@ -42,8 +42,9 @@
   `~/.local/share/superfast-monitor/samples.jsonl`; `--report 24` prints what
   it collected. It exists because the engine's log says how long each request
   took but not how many were waiting, which is the difference between a slow
-  answer and a queued one: `/health`'s `queued` is the field that says the
-  machine is fine and the budget is not. Read-only, no API key, and it exits 0
+  answer and a queued one: `/health`'s `queued` is the field that separates the
+  two, and reading its depth over time is what says whether the queue is the
+  pool or the profile's slots. Read-only, no API key, and it exits 0
   with a message when no profile is serving, so an idle machine collects no
   failed units.
 - **`tools/bench-concurrent.py`, and the measurements behind the shipped pool

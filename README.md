@@ -1144,10 +1144,11 @@ Four things to know if you tune it:
   32768). Raising the pool without checking the arena is one way to get a
   profile that will not start.
 - **A bigger pool costs memory the model also wants, and can cost the engine
-  itself.** 786,432 positions is ~22 GiB against ~14.9 GiB for the image
-  default, and 1,048,576 is ~29 GiB which, measured on 2026-09-13, no longer
-  starts on this host. If you want a pool larger than 786,432, change it,
-  restart, and read the startup line: do not assume it comes up.
+  itself.** 786,432 positions is ~21.6 GiB against ~14.9 GiB for the image
+  default (the engine prints both figures in its own pre-flight line), and
+  1,048,576 is ~29 GiB which, measured on 2026-09-13, no longer starts on this
+  host. If you want a pool larger than 786,432, change it, restart, and read the
+  startup line: do not assume it comes up.
 - **Do not reach for the disk.** `HALOGEN_CACHE_FILE` exists, but only with
   `HALOGEN_CACHE_INPLACE=0`, where each entry copies the whole KV (~26 KiB per
   position, ~6.5 GB at the native context). On this machine the host RAM is the
@@ -1212,36 +1213,47 @@ driving the same endpoint from different clients: a 777-token answer with a
 fully cached prefix (prefill 0.1 s, 100% cache) took **141 s** on one client and
 **51 s** on the identical one sent at the same moment; a single agent that had
 to re-prefill a 221,000-token context paid **351 s** of prefill while six other
-requests were in flight; and the first turn of an agent that only wanted to
-write its first file had not completed after **14 minutes**. The sampler shows
-what the engine thinks it is doing: `in_flight` 4 with `queued` 2, and the GPU
-only 61% busy on average while four conversations were open.
+requests were in flight; and the first turns of the two coding agents — which
+were to write their first file — had not completed after **14 minutes**, with
+both project directories still empty. The sampler shows what the engine thinks
+it is doing: `in_flight` 4 with `queued` 2, and the GPU only 61% busy on
+average while four conversations were open.
 
 #### The pool is a residency budget, not a speed knob
 
 [`tools/bench-concurrent.py`](#benchmark-several-agents-at-once) fires N clients
 at the same time, in one of two modes, and reads each request's own numbers out
-of the engine's log. The two shapes below differ in what they can stress:
-`8 × 30K` reservations all fit any pool, so only slot arbitration can make a
-client wait; `8 × 80K` asks for ~646K positions, which does not fit the
-image-default pool.
+of the engine's log. The two shapes below differ in what they can stress, and
+the labels are the prompt sizes the engine actually reported, not the arguments
+the tool was given — its prefix argument counts *words*, and this word list
+tokenizes to about 1.25 tokens per word:
+
+- `8 × 38K` (argument: 30000): eight reservations of ~38K fit inside any pool
+  here, so the only thing that can make a client wait is slot arbitration.
+- `8 × 101K` (argument: 80000): eight reservations of ~101K come to ~810K
+  positions, which **exceeds both pools** — 786,432 and the fitted 524,288. This
+  is the regime where the pool is exhausted on both sides; it does not separate
+  a pool that is big enough from one that is not, and the table should not be
+  read as if it did. The four-agent measurement above is what shows the two
+  pools behaving differently.
 
 | configuration | shape | aggregate | per client | mean wall | cache hit |
 |---|---|---|---|---|---|
-| pool **786432**, 4 slots | 8 × 80K | 33.8 t/s | 4.97 t/s | 159.9 s | 87% |
-| pool **786432**, 4 slots | 8 × 30K, run 1 | 53.7 t/s | 8.70 t/s | 94.2 s | 87% |
-| pool **786432**, 4 slots | 8 × 30K, run 2 | 72.2 t/s | 13.53 t/s | 64.6 s | 100% |
-| pool 524288 (engine-fitted), 4 slots | 8 × 80K | 35.5 t/s | 5.28 t/s | 151.0 s | 87% |
-| pool **786432**, **8 slots** | 8 × 30K, run 1 | 59.5 t/s | 7.45 t/s | 104.3 s | 87% |
-| pool **786432**, **8 slots** | 8 × 30K, run 2 | **86.5 t/s** | 10.84 t/s | 71.7 s | 100% |
+| pool **786432**, 4 slots | 8 × 101K | 33.8 t/s | 4.97 t/s | 159.9 s | 87% |
+| pool **786432**, 4 slots | 8 × 38K, run 1 | 53.7 t/s | 8.70 t/s | 94.2 s | 87% |
+| pool **786432**, 4 slots | 8 × 38K, run 2 | 72.2 t/s | 13.53 t/s | 64.6 s | 100% |
+| pool 524288 (engine-fitted), 4 slots | 8 × 101K | 35.5 t/s | 5.28 t/s | 151.0 s | 87% |
+| pool **786432**, **8 slots** | 8 × 38K, run 1 | 59.5 t/s | 7.45 t/s | 104.3 s | 87% |
+| pool **786432**, **8 slots** | 8 × 38K, run 2 | **86.5 t/s** | 10.84 t/s | 71.7 s | 100% |
 
 What the table says, and what decided the shipped values:
 
-- **The pool is not what is slow.** Halving it (786432 → 524288) measured
-  35.5 t/s aggregate against 33.8 — the same, within noise. With eight clients
-  the binding constraint is the four slots, not the positions. So the pool is
-  shipped for *residency* (how many long conversations stay warm) and its size
-  is set by that, not by speed.
+- **Once the pool is exhausted, its size is not what is slow.** With all eight
+  clients over-subscribed in both configurations, halving the pool
+  (786432 → 524288) measured 35.5 t/s aggregate against 33.8 — the same, within
+  noise, because eight clients against four slots is what they are waiting for.
+  So the pool is shipped for *residency* (how many long conversations stay warm)
+  and its size is set by that arithmetic, not by these numbers.
 - **Eight slots buy throughput and cost latency.** All eight conversations
   decode at once: aggregate rises 20% (72.2 → 86.5 t/s) while each client's own
   rate falls 20% (13.53 → 10.84 t/s) and its answer arrives later (64.6 →
@@ -1341,11 +1353,14 @@ Three fields are worth knowing by heart, all in `/health`:
 | field | what it tells you |
 |---|---|
 | `in_flight` | conversations being decoded right now. This is what the tokens/s table above keys on |
-| `queued` | requests that arrived and are waiting for room in the KV pool. **This is the number that means "the machine is fine, the budget is not"** |
+| `queued` | requests that arrived and are waiting: for room in the KV pool, or for one of the profile's slots to free. `/health` does not say which — the depth and the duration do. **A queue that never empties is the number the budgets have to answer for** |
 | `busy_for_s` | how long the request currently in flight has been running |
 
-A `queued` above zero for minutes at a time is the signal the pool or the
-answer budgets need changing — see
+A `queued` above zero for minutes at a time is the signal something needs
+changing, and which thing depends on the depth: a queue that stays one or two
+deep with four conversations running is the profile's four slots, which is what
+they are for; a queue that grows while fewer than four conversations are
+decoding is the pool — see
 [what a real fleet looks like](#what-a-real-fleet-looks-like-on-this-pool).
 A `queued` that is always zero while answers feel slow is a different problem,
 and the report's cache section separates the rest: a low hit rate means the

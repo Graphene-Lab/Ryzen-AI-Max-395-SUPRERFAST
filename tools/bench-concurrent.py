@@ -3,9 +3,15 @@
 
 Run ON the box (it reads the container's log for the engine's own ledger):
 
-    python3 tools/bench-concurrent.py [clients] [prefix_tokens] [max_tokens] [reps] [mode]
+    python3 tools/bench-concurrent.py [clients] [prefix_words] [max_tokens] [reps] [mode]
 
     python3 tools/bench-concurrent.py 4 120000 16384 2 shared
+
+The prefix argument counts WORDS of the fixed filler below, not tokens: this
+word list tokenizes to about 1.25 tokens per word, so 80000 produces prompts of
+~101,000 tokens. Every run prints the prompt size the engine actually reported,
+and that number — not the argument — is the one to reason about, because the
+reservation a request takes out of the KV pool is prompt + max_tokens.
 
 WHY THIS EXISTS. `tools/bench-serving.py` answers "which drafter is faster" and
 runs one request at a time with 11-token prompts. That is the wrong instrument
