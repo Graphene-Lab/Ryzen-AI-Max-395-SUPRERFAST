@@ -1219,23 +1219,20 @@ both project directories still empty. The sampler shows what the engine thinks
 it is doing: `in_flight` 4 with `queued` 2, and the GPU only 61% busy on
 average while four conversations were open.
 
-#### The pool is a residency budget, not a speed knob
+#### The pool is a residency budget, and on long conversations it is the whole story
 
 [`tools/bench-concurrent.py`](#benchmark-several-agents-at-once) fires N clients
 at the same time, in one of two modes, and reads each request's own numbers out
-of the engine's log. The two shapes below differ in what they can stress, and
-the labels are the prompt sizes the engine actually reported, not the arguments
-the tool was given — its prefix argument counts *words*, and this word list
-tokenizes to about 1.25 tokens per word:
+of the engine's log. Both shapes below are labelled with the prompt sizes the
+engine actually reported, not with the arguments the tool was given — its prefix
+argument counts *words*, and this word list tokenizes to about 1.25 tokens per
+word.
 
-- `8 × 38K` (argument: 30000): eight reservations of ~38K fit inside any pool
-  here, so the only thing that can make a client wait is slot arbitration.
-- `8 × 101K` (argument: 80000): eight reservations of ~101K come to ~810K
-  positions, which **exceeds both pools** — 786,432 and the fitted 524,288. This
-  is the regime where the pool is exhausted on both sides; it does not separate
-  a pool that is big enough from one that is not, and the table should not be
-  read as if it did. The four-agent measurement above is what shows the two
-  pools behaving differently.
+**Eight clients: more conversations than slots.** `8 × 38K` (argument 30000) is
+eight reservations that fit inside any pool here, so only slot arbitration can
+make a client wait; `8 × 101K` (argument 80000) is eight reservations of ~810K
+positions, which exceeds *both* pools at once — so that row cannot separate a
+pool that is big enough from one that is not, and it is not there to.
 
 | configuration | shape | aggregate | per client | mean wall | cache hit |
 |---|---|---|---|---|---|
@@ -1246,22 +1243,47 @@ tokenizes to about 1.25 tokens per word:
 | pool **786432**, **8 slots** | 8 × 38K, run 1 | 59.5 t/s | 7.45 t/s | 104.3 s | 87% |
 | pool **786432**, **8 slots** | 8 × 38K, run 2 | **86.5 t/s** | 10.84 t/s | 71.7 s | 100% |
 
-What the table says, and what decided the shipped values:
-
-- **Once the pool is exhausted, its size is not what is slow.** With all eight
-  clients over-subscribed in both configurations, halving the pool
-  (786432 → 524288) measured 35.5 t/s aggregate against 33.8 — the same, within
-  noise, because eight clients against four slots is what they are waiting for.
-  So the pool is shipped for *residency* (how many long conversations stay warm)
-  and its size is set by that arithmetic, not by these numbers.
 - **Eight slots buy throughput and cost latency.** All eight conversations
   decode at once: aggregate rises 20% (72.2 → 86.5 t/s) while each client's own
   rate falls 20% (13.53 → 10.84 t/s) and its answer arrives later (64.6 →
   71.7 s). An interactive agent feels the second number, so the profile keeps
   four slots.
-- **The second run is always faster than the first**, and the reason is in the
-  table: the shared prefix is already in the prompt cache (prefill 0.1 s, 100%
-  cache hit), so the second batch of eight pays no prefill at all.
+- **Once the pool is exhausted, its size stops being what is slow**: with all
+  eight clients over-subscribed in both configurations, halving the pool
+  (786432 → 524288) measured 35.5 t/s aggregate against 33.8 — the same, within
+  noise, because eight clients against four slots is what they are all waiting
+  for.
+
+**Four long conversations: the shape that separates the pools.** 4 clients ×
+163,199 tokens is 656,000 positions of reservations — above the fitted pool
+(524288), below the shipped one (786432), and with four clients against four
+slots so that nothing waits for a slot. Only the pool can make a difference
+here, and it does:
+
+| | pool **786432** | pool 524288 (fitted) |
+|---|---|---|
+| run 1 (cold): aggregate | **16.6 t/s** | 9.2 t/s |
+| run 1: mean wall clock | 187.5 s | 243.0 s |
+| run 1: conversations that had to prefill from zero | 1 of 4 (the first) | **2 of 4** |
+| run 2 (warm): aggregate | **57.7 t/s** | 15.5 t/s |
+| run 2: mean per client | **14.49 t/s** | 7.50 t/s |
+| run 2: mean wall clock | **53.6 s** | 144.4 s |
+| spread across the four clients | 0.4 s / 0.2 s | **155 s / 154 s** |
+
+With the shipped pool the four clients are indistinguishable from each other —
+all four prefill once (or resume from cache) and then decode together, and the
+warm run is 3.7× the aggregate of the smaller pool. With the fitted pool the
+engine cannot keep four conversations of that length resident: it drops what it
+cannot hold, the two requests that lose their state pay 130 s of history again,
+and the aggregate collapses because that prefill takes the machine away from
+everyone's decode. That is the same failure the four-agent measurement above
+shows at 120K, now measured with only the pool varying.
+
+One thing that does **not** happen, and it is worth knowing where to look: in
+neither arm did `queued` rise above zero (the 10-second sampler recorded a
+maximum of 0 throughout). The pool does not show up as requests waiting for
+admission — it shows up as conversations that lose their prompt cache. A
+`queued` of zero is not evidence that the pool is big enough.
 
 #### The pool also decides whether the engine starts
 
@@ -1285,15 +1307,31 @@ serving. Two lessons are in the shipped unit because of this: ask for a pool the
 host can back (786432), and check the startup line rather than the port, because
 a hung engine holds the port's process without ever listening on it.
 
+**A second way to hang, which does recover.** Later the same night, after many
+profile restarts while these measurements were being taken, the same 786432 unit
+did something else: it loaded completely — `model ready`, then `prompt cache ON`
+with its 32 entries, then uvicorn's `Started server process` — and then answered
+nothing, while serving, for three minutes. That is the case
+`HALOGEN_ENGINE_WATCHDOG_S` exists for: the container printed `this is a wedged
+engine and not a slow one`, killed the process at 180 s, and systemd restarted
+it. The difference between the two matters, and it is why the diagnostics look
+for both: the startup livelock never recovers on its own (the watchdog is
+satisfied — the engine is alive — and no restart happens because the process
+never exits), while this one recovers but can recover into a loop. What the two
+have in common is the host state: a machine that has been through many container
+starts is where both appear, and a reboot is what clears it.
+
 If it happens to you, you should not have to work it out from the log: the
 installer and `superfast-switch use` both wait for `/health`, and when that wait
-expires they now print the diagnosis themselves — the `model ready` line with no
-`prompt cache ON` after it, the engine's CPU, the pool the unit asks for, and the
-two remedies. By hand the same three checks are `journalctl --user -u
-superfast-flash` (looking for `model ready` followed by `reserving ... slot(s)`),
-`ps` (a `flash_serve` at 80%+ of a core), and `/health` answering nothing at all.
-Then lower `HALOGEN_KV_POOL_POSITIONS` in the unit, or reboot the host so the
-engine gets unfragmented memory, and start the profile again.
+expires they now print the diagnosis themselves — which of the two it is, the
+`model ready` line with no `prompt cache ON` after it (or the `wedged engine`
+line, if that is the one), the engine's CPU, the pool the unit asks for, and the
+remedies. By hand the same three checks are `journalctl --user -u
+superfast-flash` (looking for `model ready` followed by `reserving ... slot(s)`,
+or for `wedged engine`), `ps` (a `flash_serve` at 80%+ of a core), and `/health`
+answering nothing at all. Then lower `HALOGEN_KV_POOL_POSITIONS` in the unit, or
+reboot the host so the engine gets unfragmented memory, and start the profile
+again.
 
 One more check is automatic now, because it is silent otherwise: after the
 engine answers, the installer reads its `/health` and compares the pool it

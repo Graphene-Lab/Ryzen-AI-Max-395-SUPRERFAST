@@ -306,6 +306,11 @@ not_ready_hint() { # unit
         echo "  The engine reached 'model ready' and then stopped making progress:" >&2
         echo "  it is spinning while it reserves its serving slots, so waiting will" >&2
         echo "  not help and the port will not open." >&2
+    elif journalctl --user -u "$unit" --no-pager --since '20 min ago' 2>/dev/null \
+            | tail -n 500 | grep -q 'wedged engine'; then
+        echo "  The engine loaded and then wedged while serving, answering no PING:" >&2
+        echo "  its own watchdog kills it at 180 s and systemd restarts it. Seeing" >&2
+        echo "  this repeatedly means the host needs a reboot." >&2
     fi
     f="$HOME/.config/systemd/user/$unit"
     [ -f "$f" ] || f="${f}.service"

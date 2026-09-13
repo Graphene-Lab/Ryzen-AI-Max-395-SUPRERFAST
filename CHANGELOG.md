@@ -64,6 +64,19 @@
 
 ### Changed
 
+- **The pool's size is measured now, not argued.** The eight-client runs could
+  not settle it: with eight clients against four slots both pools are exceeded
+  at once and the slots decide. The shape that separates them is four clients at
+  163,199 tokens each — 656K positions of reservations, above the fitted pool
+  (524288) and below the shipped one (786432), with four clients against four
+  slots so only the pool can matter. Measured 2026-09-13: 57.7 t/s aggregate
+  with a warm cache on 786432 against 15.5 t/s on 524288, and the smaller pool
+  had to re-prefill two of the four conversations from zero (the requests that
+  lost their state paid 130 s of history again, and the four clients' wall
+  clocks spread by 155 s instead of being identical). The pool does not show up
+  as requests waiting for admission — `queued` never rose above zero in either
+  arm — it shows up as conversations that lose their prompt cache, which is
+  worth knowing before reading a `queued` of zero as spare capacity.
 - **A start that does not complete now says why, in the installer and in the
   switch.** Both wait for `/health`, and both used to give up with one line that
   named a different failure ("engine not healthy in time") and left the cause to
@@ -73,8 +86,17 @@
   is ever printed. When the wait expires, both tools now look for exactly that
   signature — `model ready` with no `prompt cache ON` after it — and print it
   with the engine's CPU, the pool the unit asks for, and the two remedies
-  (lower `HALOGEN_KV_POOL_POSITIONS`, or reboot for unfragmented memory). The
-  installer also verifies the opposite silent case after a successful start: it
+  (lower `HALOGEN_KV_POOL_POSITIONS`, or reboot for unfragmented memory).
+
+  There is a second way to hang, measured the same night after many profile
+  restarts: the engine loads completely — `model ready`, `prompt cache ON`,
+  uvicorn's `Started server process` — and then answers nothing while serving.
+  The container's own watchdog catches that one (`this is a wedged engine and
+  not a slow one`), kills it at 180 s and systemd restarts it, so it recovers —
+  possibly into a loop. Both tools now recognise that case too and say what it
+  is, because the remedies differ: the livelock never recovers by itself, and a
+  reboot is what clears the host state the two have in common. The installer
+  also verifies the opposite silent case after a successful start: it
   reads `/health` and compares the pool the engine armed with the pool the unit
   asks for, because `HALOGEN_KV_POOL_FIT=1` may fit it smaller — a request for
   1048576 came up as 524288 — and a machine quietly holding half the

@@ -174,6 +174,17 @@ engine_not_ready_hint() { # unit
         journalctl --user -u "$unit" --no-pager --since '20 min ago' 2>/dev/null \
             | grep -E 'KV pool reserved|reserving .* slot|slots: 1 ->' | tail -n 3 |
             sed 's/^/  /' || true
+    elif journalctl --user -u "$unit" --no-pager --since '20 min ago' 2>/dev/null \
+            | tail -n 500 | grep -q 'wedged engine'; then
+        # A different failure, with a different outcome: the engine loaded and
+        # then stopped answering PING while serving. The container's own
+        # watchdog kills it at HALOGEN_ENGINE_WATCHDOG_S (180 s) and systemd
+        # restarts it, so this one does recover — but in a loop, if the host is
+        # in the state that caused it.
+        log "the engine loaded, then wedged while serving and answered no PING:"
+        log "  the container's watchdog killed it and systemd restarted it. If you"
+        log "  are seeing this repeatedly, the host needs a reboot — a host that has"
+        log "  been through many container starts is what both failures have in common."
     fi
     proc="$(ps -eo pcpu=,comm= 2>/dev/null \
         | awk '$2 == "flash_serve" || $2 == "llama-server" || $2 == "halogen" {print $1"% CPU ("$2")"}' \
