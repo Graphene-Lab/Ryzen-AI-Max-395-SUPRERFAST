@@ -46,9 +46,29 @@
   machine is fine and the budget is not. Read-only, no API key, and it exits 0
   with a message when no profile is serving, so an idle machine collects no
   failed units.
+- **`tools/bench-concurrent.py`, and the measurements behind the shipped pool
+  size.** `bench-serving.py` answers which drafter is faster and runs one
+  request at a time; it cannot see what happens when several agents share the
+  machine, which is the question this box gets asked. The new instrument fires
+  N clients at once in two shapes — one whose reservations all fit any pool (so
+  only slots can make a client wait) and one that asks for more positions than
+  the image-default pool holds — and reports each request's wall clock next to
+  the engine's own numbers for it. Making its own requests identifiable in a
+  live engine's log took three attempts: counting log-tail lines attributes
+  live agents' requests to the benchmark, and tagging with the non-speculative
+  `serial` drafter hides the ledger lines entirely, so it fingerprints on a
+  distinctive `max_tokens` plus the prompt length each client reports. The
+  tables it produced, and the startup measurements they led to, are in the
+  README under "Many agents at once".
 
 ### Fixed
 
+- **The sampler cancelled `/cache` on a busy engine.** Its 15-second timeout
+  was shorter than the time the endpoint can take while the engine is decoding
+  — the handler waits behind the decoders — so every sample missed during a busy
+  period made the engine log a `CancelledError` traceback for a request the
+  client had already given up on. `/health` gets 60 s and `/cache` 120 s now,
+  and a sample that still fails is recorded as missing rather than as an error.
 - **The dense unit was the one unit `ONLY=profiles` did not refresh.** It was
   written by a heredoc in the engine phase, so the documented upgrade path —
   re-run the profiles phase to pick up changed engine settings — rewrote the

@@ -34,10 +34,18 @@ API = "http://127.0.0.1:8731"
 ROTATE_BYTES = 20 * 1024 * 1024
 
 
+# /cache walks the snapshot table, and on a busy machine it can take a long time
+# to answer: the handler waits behind the decoders. With the 15 s timeout this
+# used to have, every sample missed while the engine was decoding made the
+# engine log a CancelledError traceback for the cancelled request. /health
+# probes the engine, so it is the one that must not wait forever.
+TIMEOUTS = {"/health": 60, "/cache": 120}
+
+
 def get(path):
-    """Read one engine endpoint, or None when the engine is not serving."""
+    """Read one engine endpoint, or None when it does not answer in time."""
     try:
-        with urllib.request.urlopen(API + path, timeout=15) as r:
+        with urllib.request.urlopen(API + path, timeout=TIMEOUTS.get(path, 60)) as r:
             return json.load(r)
     except (urllib.error.URLError, OSError, ValueError):
         return None
