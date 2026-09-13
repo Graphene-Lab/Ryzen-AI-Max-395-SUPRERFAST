@@ -63,6 +63,21 @@
 
 ### Changed
 
+- **A start that does not complete now says why, in the installer and in the
+  switch.** Both wait for `/health`, and both used to give up with one line that
+  named a different failure ("engine not healthy in time") and left the cause to
+  be worked out from the journal. The cause that matters here is not a slow load:
+  after `model ready` the engine can livelock while it reserves its serving
+  slots and spin at 80-90% of a core forever without ever listening, and no error
+  is ever printed. When the wait expires, both tools now look for exactly that
+  signature — `model ready` with no `prompt cache ON` after it — and print it
+  with the engine's CPU, the pool the unit asks for, and the two remedies
+  (lower `HALOGEN_KV_POOL_POSITIONS`, or reboot for unfragmented memory). The
+  installer also verifies the opposite silent case after a successful start: it
+  reads `/health` and compares the pool the engine armed with the pool the unit
+  asks for, because `HALOGEN_KV_POOL_FIT=1` may fit it smaller — a request for
+  1048576 came up as 524288 — and a machine quietly holding half the
+  conversations its unit promises is a slow machine with no explanation.
 - **The flash profile ships a 786,432-position KV pool instead of
   1,048,576.** With 1,048,576 and `HALOGEN_KV_POOL_FIT=0` — what this project
   shipped until tonight — the engine **stops starting** on a host that has been

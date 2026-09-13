@@ -1273,10 +1273,22 @@ serving. Two lessons are in the shipped unit because of this: ask for a pool the
 host can back (786432), and check the startup line rather than the port, because
 a hung engine holds the port's process without ever listening on it.
 
-If it happens to you: `journalctl --user -u superfast-flash` shows `model ready`
-followed by `reserving ... slot(s)`, `ps` shows `flash_serve` at 80%+ of a core,
-and waiting does not help. Lower `HALOGEN_KV_POOL_POSITIONS`, or reboot the host
-to give the engine unfragmented memory again.
+If it happens to you, you should not have to work it out from the log: the
+installer and `superfast-switch use` both wait for `/health`, and when that wait
+expires they now print the diagnosis themselves — the `model ready` line with no
+`prompt cache ON` after it, the engine's CPU, the pool the unit asks for, and the
+two remedies. By hand the same three checks are `journalctl --user -u
+superfast-flash` (looking for `model ready` followed by `reserving ... slot(s)`),
+`ps` (a `flash_serve` at 80%+ of a core), and `/health` answering nothing at all.
+Then lower `HALOGEN_KV_POOL_POSITIONS` in the unit, or reboot the host so the
+engine gets unfragmented memory, and start the profile again.
+
+One more check is automatic now, because it is silent otherwise: after the
+engine answers, the installer reads its `/health` and compares the pool it
+armed with the pool the unit asks for. With `HALOGEN_KV_POOL_FIT=1` the engine
+may fit it smaller — a request for 1048576 came up as 524288 — and a machine
+that quietly holds half the conversations its unit promises is a slow machine
+nobody can explain. The installer says which of the two happened, by number.
 
 ### Benchmark several agents at once
 

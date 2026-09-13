@@ -146,6 +146,69 @@ in_profiles() {
     is_in "$PROFILES" "$1"
 }
 
+# The numeric value of one -e setting in an installed unit. The unit name may
+# come with or without its .service suffix: a caller that passes the bare name
+# would otherwise get an empty answer and a diagnostic that says nothing.
+unit_env() { # unit, VAR
+    local f="$HOME/.config/systemd/user/$1"
+    [ -f "$f" ] || f="${f}.service"
+    sed -n "s/^[[:space:]]*-e ${2}=\([0-9]*\).*/\1/p" "$f" 2>/dev/null | tail -n 1
+}
+
+# What to do about an engine that is not answering. The failure this catches is
+# not a slow load: after "model ready" the engine can livelock in its own
+# allocator while it reserves the serving slots, and spin at 80-90% of a core
+# forever without ever listening. From outside that is indistinguishable from a
+# cold load, and waiting does not help — measured 2026-09-13, three hangs, no
+# error line to report. So the diagnosis is printed where the wait already timed
+# out, and it names the remedies instead of a log command.
+engine_not_ready_hint() { # unit
+    local unit="$1" pool proc
+    if journalctl --user -u "$unit" --no-pager --since '20 min ago' 2>/dev/null \
+       | tail -n 500 | grep -q 'model ready' \
+       && ! journalctl --user -u "$unit" --no-pager --since '20 min ago' 2>/dev/null \
+            | tail -n 500 | grep -qE 'prompt cache ON|listening on'; then
+        log "the engine reached 'model ready' and then stopped making progress:"
+        log "  it is spinning while it reserves its serving slots, not loading, so"
+        log "  waiting will not help and the port will not open."
+        journalctl --user -u "$unit" --no-pager --since '20 min ago' 2>/dev/null \
+            | grep -E 'KV pool reserved|reserving .* slot|slots: 1 ->' | tail -n 3 |
+            sed 's/^/  /' || true
+    fi
+    proc="$(ps -eo pcpu=,comm= 2>/dev/null \
+        | awk '$2 == "flash_serve" || $2 == "llama-server" || $2 == "halogen" {print $1"% CPU ("$2")"}' \
+        | sort -rn | head -n 1)"
+    [ -n "$proc" ] && log "  engine process: $proc — a spinning engine burns a core, a loading one does not"
+    pool="$(unit_env "$unit" HALOGEN_KV_POOL_POSITIONS)"
+    [ -n "$pool" ] && log "  the unit asks for a $pool-position pool"
+    log "  remedies, in order: lower HALOGEN_KV_POOL_POSITIONS in"
+    log "  ~/.config/systemd/user/$unit, or reboot the host so the engine starts"
+    log "  with unfragmented memory. Then restart the unit."
+}
+
+# The engine can quietly arm a different pool than the unit asks for: with
+# HALOGEN_KV_POOL_FIT=1 it fits the pool to what the host can back, which is the
+# safe behaviour but means fewer conversations stay resident than the unit
+# promises. Saying which of the two happened costs one request and saves
+# wondering later why turns queue.
+check_armed_pool() { # unit
+    local unit="$1" want armed
+    want="$(unit_env "$unit" HALOGEN_KV_POOL_POSITIONS)"
+    [ -n "$want" ] || return 0
+    armed="$(curl -s --max-time 10 http://127.0.0.1:8731/health 2>/dev/null \
+        | sed -n 's/.*"kv_pool_positions"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p')"
+    [ -n "$armed" ] || return 0
+    if [ "$armed" = "$want" ]; then
+        log "kv pool armed as asked: $armed positions"
+    else
+        log "NOTE: the unit asks for $want positions and the engine armed $armed."
+        log "  That is HALOGEN_KV_POOL_FIT=1 fitting the pool to this host, so fewer"
+        log "  conversations stay resident than the unit asks for. Set"
+        log "  HALOGEN_KV_POOL_FIT=0 to take the number as given, or lower"
+        log "  HALOGEN_KV_POOL_POSITIONS to a pool this host can back."
+    fi
+}
+
 # The shared-memory kernel parameters are what the large checkpoints need, and
 # whether they are ACTIVE can only be read from /proc/cmdline. A machine that
 # has them written but has not booted into them fails later with "cudaMalloc
@@ -473,11 +536,13 @@ phase_engine() {
         # Require 200: the port can be open while the engine is still loading.
         if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:8731/health)" = "200" ]; then
             log "engine healthy after ~$((i * 10))s"
+            check_armed_pool superfast.service
             return 0
         fi
         sleep 10
     done
-    log "engine not healthy in time; inspect: journalctl --user -u superfast.service"
+    log "engine not healthy after ~400 s"
+    engine_not_ready_hint superfast.service
     return 1
 }
 

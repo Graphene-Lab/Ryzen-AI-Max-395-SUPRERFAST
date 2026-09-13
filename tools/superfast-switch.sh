@@ -287,7 +287,33 @@ cmd_use() {
         sleep 5
     done
     echo "profile '$p' did not become healthy in time" >&2
+    not_ready_hint "${UNIT[$p]}"
     return 1
+}
+
+# A profile that never answers is usually a cold load — but not always. After
+# "model ready" the engine can livelock in its own allocator while it reserves
+# its serving slots and spin at 80-90% of a core forever without ever listening;
+# from outside that looks exactly like a slow load and never ends. Measured
+# 2026-09-13 on the reference host: three hangs, no error line. Saying which of
+# the two it is, and what to do, is worth three lines here.
+not_ready_hint() { # unit
+    local unit="$1" pool f
+    if journalctl --user -u "$unit" --no-pager --since '20 min ago' 2>/dev/null \
+       | tail -n 500 | grep -q 'model ready' \
+       && ! journalctl --user -u "$unit" --no-pager --since '20 min ago' 2>/dev/null \
+            | tail -n 500 | grep -qE 'prompt cache ON|listening on'; then
+        echo "  The engine reached 'model ready' and then stopped making progress:" >&2
+        echo "  it is spinning while it reserves its serving slots, so waiting will" >&2
+        echo "  not help and the port will not open." >&2
+    fi
+    f="$HOME/.config/systemd/user/$unit"
+    [ -f "$f" ] || f="${f}.service"
+    pool="$(sed -n 's/^[[:space:]]*-e HALOGEN_KV_POOL_POSITIONS=\([0-9]*\).*/\1/p' \
+        "$f" 2>/dev/null | tail -n 1)"
+    [ -n "$pool" ] && echo "  This unit asks for a $pool-position KV pool." >&2
+    echo "  Remedies, in order: lower HALOGEN_KV_POOL_POSITIONS in" >&2
+    echo "  ~/.config/systemd/user/$unit, or reboot the host, then try again." >&2
 }
 
 cmd_stop() {
